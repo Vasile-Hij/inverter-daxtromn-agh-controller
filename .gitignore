@@ -1,0 +1,20 @@
+# secrets
+.env
+
+# venv
+bin/
+lib/
+lib64
+pyvenv.cfg
+__pycache__/
+
+# runtime
+*.pyc
+.lock
+.lgd-nfy*
+
+# claude
+.claude/
+
+# system
+CACHEDIR.TAG

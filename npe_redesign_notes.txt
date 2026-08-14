@@ -1,0 +1,238 @@
+N-PE BONDING + ZMAi RELAY REDESIGN - HANDOFF NOTES
+Written 2026-08-13. Nothing was changed in any file. This is analysis + open questions only.
+
+
+================================================================
+1. WHAT PROMPTED THIS
+================================================================
+AGENTS.md describes ZMAi relay control driven by battery SOC (>80% open the
+relay and run off grid, <15% close it and go back on grid). None of that
+exists in solar_monitor.py. Separately the N-PE bonding decision is keyed off
+signals that cannot actually tell "on grid" from "islanded".
+
+Intended behaviour, as stated by the owner:
+  - ZMAi relay cuts the grid when battery is over 80%, and N-PE bonding
+    must be ON while it is cut.
+  - When the ZMAi relay is ON (grid connected), bonding must still check
+    whether the system is running on battery. If on battery, N-PE is ON,
+    even if the ZMAi shows ~120W. That 120W may be the inverter's own draw,
+    or house load outside the inverter (e.g. house 400W, both PVs 340W).
+  - N-PE mainly ON when grid consumption is very low (under ~100W) and the
+    battery is supplying.
+
+Owner clarification (2026-08-14):
+  - battery installed + ZMAi wattage 50-150W: inverter is islanding
+    (almost no consumption from grid), N-PE should be ON, then turn
+    off ZMAi relay to go off grid.
+  - battery under 15% and not charging: turn on ZMAi relay (reconnect
+    to grid).
+  - grid draw over 150W: N-PE OFF (real consumption, not islanding).
+  - no battery (with or without PVs) + ZMAi wattage 50-150W: inverter
+    cannot island, N-PE should be OFF.
+
+
+================================================================
+2. FINDINGS FROM THE LIVE SYSTEM
+================================================================
+
+2.1  THE RELAY-STATE TOPIC DOES NOT EXIST
+Subscribed to energy-smart-meter-zmai-90/# for 90 seconds. Topics seen:
+    connected
+    voltage/get
+    current/get
+    power/get
+    power_factor/get
+    power_apparent/get
+    power_reactive/get
+    energycounter/get
+    energycounter_today/get
+    energycounter_yesterday/get
+    energycounter_last_hour/get
+    energycounter_2_days_ago/get
+    energycounter_3_days_ago/get
+    energycounter_clear_date/get
+
+energy-smart-meter-zmai-90/1/get was NEVER published.
+
+Consequences:
+  - solar_monitor.py:251 subscribes to .../+/get which would include 1/get,
+    but nothing ever arrives.
+  - ZmaiMeter.relay_is_on stays None forever (solar_monitor.py:86-87).
+  - grid_relay_is_open is therefore permanently False (solar_monitor.py:140).
+    That branch of the off-grid detection is dead code.
+  - AGENTS.md:26 claims relay state is one of the two usable off-grid
+    signals. In practice it is not available at all.
+  - There is NO READBACK of relay position. Even once we can command the
+    relay, nothing confirms where it actually is. This matters for the
+    "bond N-PE before the relay opens" interlock (AGENTS.md:24) - as things
+    stand that interlock would be open-loop.
+
+Caveat worth re-checking: OpenBeken may only publish channel state on
+change, and it may not be retained. 90s of quiet is strong evidence but not
+absolute proof the channel is unmapped. Checking the device's web UI would
+settle it.
+
+2.2  THE REAL "ON BATTERY" SIGNAL IS NOT BEING READ
+mppsolar PI30 provides QMOD ("Mode inquiry"), which returns Device Mode
+directly. Confirmed in:
+    lib/python3.13/site-packages/mppsolar/protocols/pi30.py:500-523
+Values:
+    P = Power on      S = Standby      L = Line       B = Battery
+    F = Fault         H = Power saving Y = Bypass
+
+solar_monitor.py only ever issues QPIGS (solar_monitor.py:219) and infers
+grid presence from AC Input Voltage < 50V (GRID_VOLTAGE_THRESHOLD_V,
+solar_monitor.py:135). That is the wrong test: the inverter reports AC input
+voltage whenever grid is PRESENT AT ITS TERMINALS, whether or not it has
+transferred to battery. So the current code cannot distinguish Line mode
+from Battery mode. It only detects total grid loss / relay open upstream.
+
+QMOD == "B" is exactly the owner's "check if still runs on battery".
+
+2.3  LIVE STATE AT TIME OF WRITING (dusk, no battery fitted)
+    grid (ZMAi)            447.9 W, 237.3 V, 4.11 A, pf ~0.5
+    inverter ac output     309 W
+    inverter ac input      239.6 V
+    PV1                    8 W  (91.4 V)
+    PV2 derived            0 W
+    battery                0 %, 12.3 V, no charge/discharge current
+    npe mode               manual_off
+    npe state              OFF
+    failsafe               ok
+Note grid 448W vs inverter output 309W. That ~139W gap is precisely the
+"load outside the inverter" case described in section 1 - proof that ZMAi
+watts alone cannot be read as inverter input draw.
+
+2.4  SERVICE
+solar-monitor.service is active, running from /home/vhij/ctrl/bin/python3,
+WatchdogSec=120, Restart=always. Description still says "Tomzn + SSR".
+Inverter serial goes silent intermittently (seen in journal at 17:15, 17:32,
+20:58) and recovers; the reconnect-after-5-failures path is doing its job.
+
+
+================================================================
+3. SAFETY POINT ON THE PROPOSED RULE
+================================================================
+"Bond when grid draw is under ~100W and the battery is supplying" bonds N-PE
+while the ZMAi relay is still CLOSED. If the inverter is in Line mode at
+that moment (grid-assist at low draw), its output neutral is ALREADY bonded
+through the supply's N-E bond. Driving GPIO27 then creates a SECOND bond,
+and neutral return current splits across the PE conductor. That is the
+hazard AGENTS.md:2 exists to prevent, plus likely RCD nuisance tripping.
+
+Owner clarification resolves this: the wattage band (50-150W) is only
+meaningful WITH a battery installed - that means the inverter has islanded
+and the 50-150W is house load outside the inverter, not grid draw through
+it. Without a battery the inverter cannot island, so the same wattage band
+is real grid consumption and bonding must stay OFF.
+
+QMOD == "B" would be the ideal confirmation (inverter's transfer switch is
+OPEN, output neutral is FLOATING), but the battery-present + wattage-band
+rule is safe because without a battery the inverter physically cannot
+transfer to battery mode. QMOD remains worth adding as corroboration once
+validated.
+
+
+================================================================
+4. PROPOSED DESIGN (not implemented)
+================================================================
+Primary (wattage-band + battery state):
+    BATTERY_INSTALLED + ZMAi 50-150W  -> bond ON, then open ZMAi relay
+                                         (islanding -> go off grid)
+    BATTERY_INSTALLED + SOC < 15%
+      + not charging                   -> close ZMAi relay (back on grid)
+    ZMAi > 150W                        -> bond OFF (real grid consumption)
+    NOT BATTERY_INSTALLED + any watts  -> bond OFF (cannot island)
+    ZMAi relay open (off grid)         -> bond ON  regardless
+
+Secondary (QMOD corroboration, once validated):
+    QMOD == "B"            -> confirms islanding, bond ON
+    QMOD == "L"            -> confirms grid, bond OFF
+    QMOD == "Y" (bypass)   -> treat as L, bond OFF  - CONFIRM THIS
+    QMOD == "F" (fault)    -> decide policy - CONFIRM
+    QMOD unreadable        -> rely on primary wattage-band logic above
+
+Keep from the current code (all of it is sound and worth preserving):
+    - 3s stability hold before acting
+    - battery reading held 30s across transient serial read failures
+    - ZMAi stale 15s / inverter stale 30s windows
+    - "failsafe blind" alarm + HA safety sensor when both sources are down
+    - alarm throttling, systemd watchdog, MQTT re-arm on reconnect
+    - reconnect inverter after 5 consecutive failed reads
+
+Remove:
+    - the grid_relay_is_open branch, or rebuild it on a signal that exists
+
+Add (once the relay command is known):
+    - islanding cutover: battery + ZMAi 50-150W -> bond N-PE, then open
+      ZMAi relay (go off grid)
+    - reconnect: SOC < 15% + not charging -> close ZMAi relay (back on grid)
+    - interlock: bond N-PE FIRST, confirm, settle, THEN open the relay
+    - grid draw > 150W -> N-PE OFF
+    - keep everything gated on BATTERY_INSTALLED
+
+Thresholds to pin down: 50 / 150W band edges, 15% SOC floor, settle
+time between bonding and opening the relay.
+
+
+================================================================
+5. OPEN QUESTIONS - ANSWER THESE BEFORE CODING
+================================================================
+Q1. PARTIALLY ANSWERED (2026-08-14). Owner clarified: the wattage band
+    (50-150W) is meaningful only with a battery - it signals islanding.
+    Without a battery, same wattage is real grid draw, N-PE stays OFF.
+    This makes the wattage-band + battery-state rule the PRIMARY trigger.
+    QMOD remains worth adding as corroboration/secondary check - still
+    worth capturing QMOD output across a real transfer to validate it.
+
+Q2. How is the ZMAi relay actually commanded?
+    Candidates:
+      a) publish 1/0 to energy-smart-meter-zmai-90/1/set
+         - but this device never publishes 1/get, hinting channel 1 may
+           not be mapped as a relay at all. Would be commanding blind.
+      b) a pulse script on the device - AGENTS.md:46 says the relay is
+         bistable, driven by 500ms pulses from pulse_on.bat / pulse_off.bat.
+         If so, what topic triggers those?
+      c) unknown - get the ZMAi's IP and read the OpenBeken web UI /
+         config to find the real channel mapping and command topic.
+    NOT guessed at, deliberately: a wrong /set publish switches the whole
+    house supply.
+
+Q3. Can we get any relay position readback at all? Without it the
+    bond-before-open interlock is open-loop. Options: enable the channel's
+    state publish in OpenBeken, or infer from the inverter going to
+    Battery mode after a commanded open (slow, but a confirmation).
+
+Q4. No battery is fitted (BATTERY_INSTALLED = False, SOC reads 0%,
+    12.3V phantom). None of the SOC cutover can be tested until one is in.
+    Implement it inert and gated, or defer entirely?
+
+
+================================================================
+6. AGENTS.md DRIFT (separate from the above, still worth fixing)
+================================================================
+Documented but not implemented:
+  - AGENTS.md:16  solar_monitor.py -> .../1/set -> ZMAi grid relay.
+                  The script never publishes to any /set topic.
+  - AGENTS.md:22-23  SOC-driven relay open/close. No SOC logic exists.
+                  battery_capacity_pct is published but never acted on.
+  - AGENTS.md:24  bond before the relay opens. Nothing opens the relay.
+  - AGENTS.md:46  pulse_on.bat / pulse_off.bat. Not in the repo.
+  - AGENTS.md:40  says the ZMAi detects <30W and activates a relay to bond
+                  N-PE. Wrong as written - the pi decides and drives GPIO27
+                  (solar_monitor.py:141, 449). ZMAi relay state is only an
+                  input, and as established it is not even published.
+
+Implemented but not documented:
+  - AC input voltage < 50V as an off-grid signal (GRID_VOLTAGE_THRESHOLD_V)
+  - 3s stable hold before bonding
+  - battery-discharge failsafe with 30s hold over serial dropouts
+  - ZMAi 15s / inverter 30s staleness windows
+  - "failsafe blind" state + HA safety sensor
+  - systemd READY / WATCHDOG notifications
+  - inverter port reopened after 5 consecutive failures
+  - discovery + subscriptions re-armed on every MQTT reconnect
+
+Style note: AGENTS.md:30 says no try/except; sd_notify uses try/finally
+(solar_monitor.py:206-210). No except, just socket cleanup - probably fine,
+but it is the one place that reads against the rule.
