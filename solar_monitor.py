@@ -4,8 +4,8 @@ import socket
 import time
 
 import paho.mqtt.client as mqtt
+import serial
 from gpiozero import DigitalOutputDevice
-from mppsolar.helpers import get_device_class
 
 # Grid meter is a ZMAi-90 (BK7231N/CBU) running OpenBeken with the RN8209 driver.
 # It pushes readings over MQTT roughly once a second; the previous Tomzn was polled
@@ -27,8 +27,6 @@ ZMAI_STALE_SECONDS = 15
 # left the inverter silent. this symlink follows the FTDI chip's serial number.
 INVERTER_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0"
 INVERTER_BAUD = 2400
-INVERTER_PROTOCOL = "PI30"
-INVERTER_RECONNECT_AFTER_FAILURES = 5
 INVERTER_STALE_SECONDS = 30
 ALARM_REPEAT_SECONDS = 300
 
@@ -210,34 +208,118 @@ def sd_notify(message):
         sock.close()
 
 
-def build_inverter_device():
-    device_class = get_device_class("mppsolar")
-    return device_class(name="inverter", port=INVERTER_PORT, protocol=INVERTER_PROTOCOL, baud=INVERTER_BAUD)
+class DaxtromnInverter:
+    """Daxtromn hybrid inverter polled over RS232 (PI30 protocol).
 
+    The inverter leaks its internal Pylon BMS traffic onto the RS232 line. On ~10%
+    of queries this interleaves with the QPIGS response and corrupts the '(' start
+    byte. The poll method retries once, which brings the effective success rate above
+    99%.
+    """
 
-def read_inverter(device):
-    result = device.run_command(command="QPIGS")
-    if "ERROR" in result:
+    QPIGS_CMD = b"QPIGS\xb7\xa9\r"
+    QPIGS_FIELD_NAMES = [
+        "ac_input_voltage_v",
+        "ac_input_frequency_hz",
+        "ac_output_voltage_v",
+        "ac_output_frequency_hz",
+        "ac_output_apparent_power_va",
+        "ac_output_power_w",
+        "ac_output_load_pct",
+        "bus_voltage_v",
+        "battery_voltage_v",
+        "battery_charging_current_a",
+        "battery_capacity_pct",
+        "heatsink_temperature_c",
+        "pv1_input_current_a",
+        "pv1_input_voltage_v",
+        "battery_voltage_scc_v",
+        "battery_discharge_current_a",
+        "device_status",
+        "rsv1",
+        "rsv2",
+        "pv1_power_w",
+    ]
+
+    def __init__(self, port, baud, stale_seconds):
+        self._port = port
+        self._baud = baud
+        self._stale_seconds = stale_seconds
+        self._last_success_time = None
+        self.last_data = None
+
+    def _query_serial(self):
+        """Send QPIGS and return all raw bytes received, or None if port missing."""
+        if not os.path.exists(self._port):
+            return None
+        connection = serial.Serial(self._port, self._baud, timeout=2)
+        connection.reset_input_buffer()
+        connection.write(self.QPIGS_CMD)
+        raw_response = b""
+        read_deadline = time.time() + 2
+        while time.time() < read_deadline:
+            waiting = connection.in_waiting
+            if waiting > 0:
+                raw_response += connection.read(waiting)
+            else:
+                incoming_byte = connection.read(1)
+                if not incoming_byte:
+                    break
+                raw_response += incoming_byte
+        connection.reset_input_buffer()
+        connection.close()
+        return raw_response
+
+    def _parse_qpigs(self, raw_response):
+        """Extract the '('-prefixed PI30 frame and parse its fields."""
+        frame_start = raw_response.find(b"(")
+        if frame_start < 0:
+            return None
+        frame_end = raw_response.find(b"\r", frame_start)
+        if frame_end < 0:
+            return None
+        qpigs_payload = raw_response[frame_start + 1 : frame_end]
+
+        response_text = qpigs_payload.decode("ascii", errors="replace")
+        response_fields = response_text.split()
+        if len(response_fields) < len(self.QPIGS_FIELD_NAMES):
+            return None
+
+        parsed_data = {}
+        for field_index, field_name in enumerate(self.QPIGS_FIELD_NAMES):
+            raw_value = response_fields[field_index]
+            if field_name == "device_status":
+                parsed_data[field_name] = raw_value
+            elif is_number(raw_value):
+                parsed_data[field_name] = float(raw_value)
+        return parsed_data
+
+    def poll(self, now):
+        """Query QPIGS and return parsed data dict, or None on failure.
+
+        Retries once on a corrupted frame (Pylon BMS interference).
+        """
+        for _attempt in range(2):
+            raw_response = self._query_serial()
+            if raw_response is None:
+                return None
+            parsed_data = self._parse_qpigs(raw_response)
+            if parsed_data is not None:
+                self.last_data = parsed_data
+                self._last_success_time = now
+                return parsed_data
         return None
 
-    data = {}
-    if "AC Output Active Power" in result:
-        data["ac_output_power_w"] = result["AC Output Active Power"][0]
-    if "AC Input Voltage" in result:
-        data["ac_input_voltage_v"] = result["AC Input Voltage"][0]
-    if "PV Input Power" in result:
-        data["pv1_power_w"] = result["PV Input Power"][0]
-    if "PV Input Voltage" in result:
-        data["pv1_input_voltage_v"] = result["PV Input Voltage"][0]
-    if "Battery Capacity" in result:
-        data["battery_capacity_pct"] = result["Battery Capacity"][0]
-    if "Battery Voltage" in result:
-        data["battery_voltage_v"] = result["Battery Voltage"][0]
-    if "Battery Charging Current" in result:
-        data["battery_charging_current_a"] = result["Battery Charging Current"][0]
-    if "Battery Discharge Current" in result:
-        data["battery_discharge_current_a"] = result["Battery Discharge Current"][0]
-    return data
+    def has_recent_data(self, now):
+        if self._last_success_time is None:
+            return False
+        return (now - self._last_success_time) < self._stale_seconds
+
+    def alarm_detail(self):
+        if self._last_success_time is None:
+            return f"no valid read since start, port {self._port}"
+        elapsed = int(time.time() - self._last_success_time)
+        return f"silent for {elapsed}s, port {self._port}"
 
 
 def on_mqtt_connect(client, userdata, flags, rc):
@@ -263,7 +345,7 @@ def on_mqtt_message(client, userdata, message):
 
 
 def publish_discovery(client):
-    device_info = {"identifiers": [DEVICE_ID], "name": "zmai-daxtromn", "manufacturer": "Daxtromn/ZMAi-90"}
+    device_info = {"identifiers": [DEVICE_ID], "name": "rasp", "manufacturer": "Daxtromn/ZMAi-90"}
     availability = [{"topic": AVAILABILITY_TOPIC, "payload_available": "online", "payload_not_available": "offline"}]
 
     sensors = [
@@ -362,9 +444,7 @@ def publish_discovery(client):
 def main():
     zmai = ZmaiMeter()
     npe = NpeBonding(NPE_RELAY_PIN, NPE_BOND_THRESHOLD_W, NPE_BOND_STABLE_SECONDS, NPE_BATTERY_STALE_SECONDS)
-    inverter = build_inverter_device()
-    inverter_consecutive_failures = 0
-    inverter_last_success_time = None
+    inverter = DaxtromnInverter(INVERTER_PORT, INVERTER_BAUD, INVERTER_STALE_SECONDS)
     inverter_alarm = Alarm("inverter-silent", ALARM_REPEAT_SECONDS)
     failsafe_alarm = Alarm("npe-failsafe-blind", ALARM_REPEAT_SECONDS)
 
@@ -395,12 +475,8 @@ def main():
         client.publish(f"{BASE_TOPIC}/zmai/data_status", "online" if zmai_online else "offline")
         grid_power_for_decision = zmai.power_w if zmai_online else None
 
-        inverter_data = read_inverter(inverter)
-        if not inverter_data:
-            inverter_consecutive_failures += 1
-        else:
-            inverter_consecutive_failures = 0
-            inverter_last_success_time = cycle_start
+        inverter_data = inverter.poll(cycle_start)
+        if inverter_data is not None:
             for key, value in inverter_data.items():
                 client.publish(f"{BASE_TOPIC}/inverter/{key}", value)
 
@@ -421,22 +497,11 @@ def main():
                 client.publish(f"{BASE_TOPIC}/derived/pv2_power_w", pv2_power_w)
                 client.publish(f"{BASE_TOPIC}/derived/pv_total_power_w", inverter_data["pv1_power_w"] + pv2_power_w)
 
-        if inverter_consecutive_failures >= INVERTER_RECONNECT_AFTER_FAILURES:
-            inverter = build_inverter_device()
-            inverter_consecutive_failures = 0
-
-        inverter_online = (
-            inverter_last_success_time is not None
-            and (cycle_start - inverter_last_success_time) < INVERTER_STALE_SECONDS
-        )
+        inverter_online = inverter.has_recent_data(cycle_start)
         client.publish(f"{BASE_TOPIC}/inverter/data_status", "online" if inverter_online else "offline")
-        if inverter_last_success_time is None:
-            silent_detail = f"no valid read since start, port {INVERTER_PORT}"
-        else:
-            silent_detail = f"silent for {int(cycle_start - inverter_last_success_time)}s, port {INVERTER_PORT}"
-        inverter_alarm.update(not inverter_online, silent_detail, cycle_start)
+        inverter_alarm.update(not inverter_online, inverter.alarm_detail(), cycle_start)
 
-        ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data else None
+        ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
 
         # Off-grid detection has three independent signals; a dead inverter kills two of
         # them at once. With the meter also gone nothing can bond N-PE on a grid loss,
