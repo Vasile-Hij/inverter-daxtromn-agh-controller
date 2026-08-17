@@ -1,0 +1,57 @@
+{
+    "inverter_model": "Daxtromn AGH-10.2KW",
+    "protocol": "PI30",
+    "port": "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0",
+    "baud": 2400,
+    "battery": "DAH Solar 14kWh LiFePO4 51.2V 280Ah",
+    "settings": {
+        "program_01_output_source_priority": {
+            "value": 2,
+            "label": "SBU priority"
+        },
+        "program_02_max_total_charging_current_a": {
+            "value": 160,
+            "max_for_model": 160,
+            "note": "solar + utility combined"
+        },
+        "program_03_ac_input_voltage_range": {
+            "value": 1,
+            "label": "UPS (170-280VAC)"
+        },
+        "program_05_battery_type": {
+            "value": 3,
+            "label": "LIb (Lithium)",
+            "note": "locks programs 26, 27, 29 to built-in lithium values"
+        },
+        "program_11_max_utility_charging_current_a": {
+            "value": 100,
+            "max_for_model": 160
+        },
+        "program_16_charger_source_priority": {
+            "value": 2,
+            "label": "Solar and Utility"
+        },
+        "program_26_bulk_cv_voltage_v": {
+            "value": 58.4,
+            "locked_by": "LIb battery type",
+            "dah_recommended": 57.6,
+            "per_cell_v": 3.65
+        },
+        "program_27_float_voltage_v": {
+            "value": 58.0,
+            "locked_by": "LIb battery type",
+            "per_cell_v": 3.625
+        },
+        "program_29_low_dc_cutoff_voltage_v": {
+            "value": 41.0,
+            "locked_by": "LIb battery type",
+            "dah_recommended": 43.2,
+            "per_cell_v": 2.5625
+        },
+        "battery_recharge_voltage_v": 44.0,
+        "battery_redischarge_voltage_v": 52.0,
+        "battery_nominal_voltage_v": 48.0
+    },
+    "qpiri_raw": "230.0 44.3 230.0 50.0 44.3 0200 0200 48.0 44.0 41.0 58.4 58.0 3 100 160 1 2 2 1 01 0 0 52.0 0 1 44.0 30 44.0",
+    "read_date": "2026-08-15"
+}

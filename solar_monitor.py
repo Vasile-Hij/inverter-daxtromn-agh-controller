@@ -30,10 +30,9 @@ INVERTER_BAUD = 2400
 INVERTER_STALE_SECONDS = 30
 ALARM_REPEAT_SECONDS = 300
 
-# No battery fitted yet. PV2 is derived from the inverter's own output, so it must
-# still be computed without a battery term - the Daxtromn generates on PV2 but does
-# not report that string over RS232.
-BATTERY_INSTALLED = False
+BATTERY_VOLTAGE_PRESENT_V = 20
+BATTERY_CURRENT_NOISE_A = 0.5
+BATTERY_OUTPUT_FLOOR_W = 50
 
 POLL_INTERVAL_SECONDS = 5
 
@@ -47,10 +46,9 @@ DEVICE_ID = "solar_pi"
 
 NPE_MODE_TOPIC = f"{BASE_TOPIC}/npe_bonding/mode/set"
 NPE_MODES = ("auto", "manual_on", "manual_off")
-# No battery fitted yet: the inverter runs grid + PV only, so it cannot island and
-# N-PE bonding is never required. The detection logic below stays live and reports,
-# it just cannot drive the relay. Set this back to "auto" when the battery is in.
-NPE_DEFAULT_MODE = "manual_off"
+NPE_DEFAULT_MODE = "auto"
+PV_EFFICIENCY_TOPIC = f"{BASE_TOPIC}/pv/efficiency/set"
+PV_EFFICIENCY_DEFAULT = 0.93
 AVAILABILITY_TOPIC = f"{BASE_TOPIC}/status"
 
 
@@ -99,6 +97,25 @@ def is_number(text):
     return False
 
 
+def is_battery_present(inverter_data):
+    if inverter_data is None:
+        return False
+    if inverter_data.get("battery_voltage_v", 0) > BATTERY_VOLTAGE_PRESENT_V:
+        return True
+    if inverter_data.get("battery_charging_current_a", 0) > BATTERY_CURRENT_NOISE_A:
+        return True
+    if inverter_data.get("battery_discharge_current_a", 0) > BATTERY_CURRENT_NOISE_A:
+        return True
+    if inverter_data.get("battery_capacity_pct", 0) > 0:
+        return True
+    ac_input_voltage = inverter_data.get("ac_input_voltage_v", 0)
+    pv_power = inverter_data.get("pv1_power_w", 0)
+    output_power = inverter_data.get("ac_output_power_w", 0)
+    if ac_input_voltage < GRID_VOLTAGE_THRESHOLD_V and pv_power < 10 and output_power > BATTERY_OUTPUT_FLOOR_W:
+        return True
+    return False
+
+
 class NpeBonding:
     def __init__(self, pin, threshold_w, stable_seconds, battery_stale_seconds):
         self._threshold_w = threshold_w
@@ -109,6 +126,7 @@ class NpeBonding:
         self._last_battery_power_w = None
         self._last_battery_update_time = None
         self.mode = NPE_DEFAULT_MODE
+        self.last_reasons = {}
 
     def decide(self, ac_input_voltage_v, grid_power_w, grid_relay_is_on, grid_online, battery_power_w, now):
         if self.mode == "manual_on":
@@ -143,6 +161,15 @@ class NpeBonding:
             not grid_online and held_battery_power_w is not None and held_battery_power_w > self._threshold_w
         )
         off_grid_signal = grid_absent_by_inverter or grid_absent_by_meter or grid_absent_by_battery_failsafe
+
+        self.last_reasons = {
+            "grid_absent_by_inverter": grid_absent_by_inverter,
+            "grid_absent_by_meter": grid_absent_by_meter,
+            "grid_absent_by_failsafe": grid_absent_by_battery_failsafe,
+            "ac_input_v": ac_input_voltage_v,
+            "grid_power_w": grid_power_w,
+            "grid_relay_open": grid_relay_is_open,
+        }
 
         if not off_grid_signal:
             self._low_power_since = None
@@ -239,6 +266,7 @@ class DaxtromnInverter:
         "rsv1",
         "rsv2",
         "pv1_power_w",
+        "rsv3",
     ]
 
     def __init__(self, port, baud, stale_seconds):
@@ -330,6 +358,7 @@ def on_mqtt_connect(client, userdata, flags, rc):
     """
     client.publish(AVAILABILITY_TOPIC, "online", retain=True)
     client.subscribe(NPE_MODE_TOPIC)
+    client.subscribe(PV_EFFICIENCY_TOPIC)
     client.subscribe(f"{ZMAI_TOPIC_PREFIX}/+/get")  # includes 1/get, the grid relay state
     publish_discovery(client)
     print("mqtt connected, subscriptions and discovery re-armed", flush=True)
@@ -340,6 +369,13 @@ def on_mqtt_message(client, userdata, message):
     if message.topic == NPE_MODE_TOPIC:
         if payload in NPE_MODES:
             userdata["npe"].mode = payload
+        return
+    if message.topic == PV_EFFICIENCY_TOPIC:
+        if is_number(payload):
+            value = float(payload)
+            if 0.5 <= value <= 1.0:
+                userdata["pv_efficiency"] = value
+                print(f"pv efficiency set to {value}", flush=True)
         return
     userdata["zmai"].on_message(message.topic, payload, time.time())
 
@@ -448,7 +484,8 @@ def main():
     inverter_alarm = Alarm("inverter-silent", ALARM_REPEAT_SECONDS)
     failsafe_alarm = Alarm("npe-failsafe-blind", ALARM_REPEAT_SECONDS)
 
-    client = mqtt.Client(userdata={"npe": npe, "zmai": zmai})
+    userdata = {"npe": npe, "zmai": zmai, "pv_efficiency": PV_EFFICIENCY_DEFAULT}
+    client = mqtt.Client(userdata=userdata)
     client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
     client.on_connect = on_mqtt_connect
     client.on_message = on_mqtt_message
@@ -486,16 +523,15 @@ def main():
                 client.publish(f"{BASE_TOPIC}/derived/battery_charge_power_w", max(-battery_power_w, 0))
                 client.publish(f"{BASE_TOPIC}/derived/battery_discharge_power_w", max(battery_power_w, 0))
 
-            if BATTERY_INSTALLED:
-                battery_contribution_w = battery_power_w
-            else:
-                battery_contribution_w = 0.0
+            battery_contribution_w = battery_power_w if is_battery_present(inverter_data) else 0.0
 
             if "ac_output_power_w" in inverter_data and "pv1_power_w" in inverter_data and battery_contribution_w is not None and grid_power_for_decision is not None:
-                total_pv_w = (inverter_data["ac_output_power_w"] - battery_contribution_w - grid_power_for_decision) / 0.85
+                pv_efficiency = userdata["pv_efficiency"]
+                total_pv_w = (inverter_data["ac_output_power_w"] - grid_power_for_decision) / pv_efficiency - battery_contribution_w
                 pv2_power_w = max(total_pv_w - inverter_data["pv1_power_w"], 0)
                 client.publish(f"{BASE_TOPIC}/derived/pv2_power_w", pv2_power_w)
                 client.publish(f"{BASE_TOPIC}/derived/pv_total_power_w", inverter_data["pv1_power_w"] + pv2_power_w)
+                client.publish(f"{BASE_TOPIC}/pv/efficiency/state", pv_efficiency)
 
         inverter_online = inverter.has_recent_data(cycle_start)
         client.publish(f"{BASE_TOPIC}/inverter/data_status", "online" if inverter_online else "offline")
@@ -510,9 +546,14 @@ def main():
         client.publish(f"{BASE_TOPIC}/npe_bonding/failsafe_status", "blind" if failsafe_blind else "ok")
         failsafe_alarm.update(failsafe_blind, "inverter and ZMAi-90 both down, N-PE cannot detect grid loss", cycle_start)
 
+        battery_present = is_battery_present(inverter_data)
+        client.publish(f"{BASE_TOPIC}/derived/battery_present", "ON" if battery_present else "OFF")
+
         desired_bond_state = npe.decide(ac_input_voltage_v, grid_power_for_decision, zmai.relay_is_on, zmai_online, battery_power_w, cycle_start)
         npe.apply(desired_bond_state)
         client.publish(f"{BASE_TOPIC}/npe_bonding/state", "ON" if npe.is_bonded else "OFF")
+        for reason_key, reason_value in npe.last_reasons.items():
+            client.publish(f"{BASE_TOPIC}/npe_bonding/debug/{reason_key}", reason_value)
         client.publish(f"{BASE_TOPIC}/npe_bonding/mode/state", npe.mode)
 
         elapsed = time.time() - cycle_start

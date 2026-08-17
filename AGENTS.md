@@ -2,7 +2,7 @@
 - this is a very important management plan for electricity, so it is very important to be safe and fire hazard free
 - implies a Daxtromn AGH-10.2 kw inverter
 - grid data from ZMAi-90 smart meter (BK7231N/CBU, OpenBeken + RN8209 driver) over MQTT
-- inverter data via RS232 to pi (mppsolar, PI30, /dev/serial/by-id/... never /dev/ttyUSBn,
+- inverter data via RS232 to pi (direct pyserial, PI30/QPIGS, /dev/serial/by-id/... never /dev/ttyUSBn,
   it renumbers on replug and the inverter goes silent)
 - battery data via RS485 from inverter, only when a battery is fitted
 
@@ -20,9 +20,9 @@
   - battery installed + ZMAi wattage 50-150W: inverter is islanding, N-PE ON, then turn off ZMAi relay (go off grid)
   - battery under 15% and not charging: turn on ZMAi relay (reconnect to grid)
   - grid draw over 150W: N-PE OFF (real grid consumption, not islanding)
-  - no battery (with or without PVs): inverter cannot island, N-PE OFF regardless of wattage
+  - no battery detected (with or without PVs): inverter cannot island, N-PE OFF regardless of wattage
   - ZMAi relay open (off grid): N-PE ON regardless
-- no battery: inverter cannot island, so NPE_DEFAULT_MODE = manual_off, logic stays live but inert
+- no battery detected: inverter cannot island, N-PE stays off in auto mode
 - opening the ZMAi relay islands the house, so N-PE must be bonded before it opens
 - ZMAi measures the line side, its voltage stays live with the relay open, so voltage is not
   a usable off-grid signal; relay state (energy-smart-meter-zmai-90/1/get) and power are
@@ -40,9 +40,21 @@
 **How it works**
 - daxtromn inverter has no bounding for N-PE, so we have do it manually
 - ZMAi smart meter detects under 30w consumption it will activate an relay to bound N-PE after daxtromn inverter
-- inverter reads data via RS232 using mppsolar; PV2 generates but is not exposed by the
-  protocol, so derive it: (ac_output - battery - grid) / 0.85 - pv1. battery term is 0
-  while BATTERY_INSTALLED is false
+- inverter reads data via RS232 using direct pyserial (QPIGS command, PI30 protocol);
+  Daxtromn AGH does NOT expose PV2 via serial (QPIGS2 returns NAK, QP2GS0 returns NAK,
+  QPIGS fields 17-18 and 21 are zero/stub — confirmed on firmware, Dess Monitor app also
+  shows 0V for PV2). PV2 is derived from energy balance:
+  pv2 = (ac_output - grid) / 0.93 - battery_net - pv1
+  battery_net is (discharge - charge) × voltage; negative when charging.
+  battery term is 0 when no battery detected.
+  the 0.85 divisor accounts for DC-AC conversion losses and applies only to the AC-side
+  terms (ac_output - grid), not to battery which is already on the DC bus
+- battery presence is auto-detected every cycle from 5 independent signals:
+  1. battery voltage > 20V (direct inverter telemetry)
+  2. charging current > 0.5A (battery is charging)
+  3. discharge current > 0.5A (battery is discharging)
+  4. battery SOC > 0% (inverter reports capacity)
+  5. grid off + no PV + inverter outputting > 50W (energy must come from battery)
 - inverter reads data from 485 from battery
 - calculation of consumption in real time every 5 seconds from invertor, ZMAi, battery
 - ZMAi relay is bistable, driven by 500ms pulses from pulse_on.bat / pulse_off.bat on the device
