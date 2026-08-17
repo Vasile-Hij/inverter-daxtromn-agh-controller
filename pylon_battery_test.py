@@ -3,10 +3,11 @@ import time
 
 import serial
 
-PYLON_PORT = "/dev/ttyUSB1"
-PYLON_BAUD = 115200
-PYLON_ADR = 0x12  # single-group host address for system-level commands (0x12/0x22/.../0x72)
+PYLON_PORT = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
+PYLON_BAUD = 9600
+PYLON_ADR = 0x02  # first battery address per Pylon V3.5 protocol (starts from 2)
 PYLON_CID1 = 0x46
+PYLON_CID2_ANALOG = 0x42
 PYLON_CID2_SYSTEM_ANALOG = 0x61
 PYLON_TIMEOUT_SECONDS = 2
 PYLON_RESPONSE_OK = 0x00
