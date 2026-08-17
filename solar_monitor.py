@@ -4,12 +4,10 @@ import socket
 import time
 
 import paho.mqtt.client as mqtt
-import serial
 from gpiozero import DigitalOutputDevice
 
-# Grid meter is a ZMAi-90 (BK7231N/CBU) running OpenBeken with the RN8209 driver.
-# It pushes readings over MQTT roughly once a second; the previous Tomzn was polled
-# over the local network with tinytuya. See solar_monitor_tomzn.py for that version.
+from pi30 import PI30Connection, is_number
+
 ZMAI_TOPIC_PREFIX = "energy-smart-meter-zmai-90"
 ZMAI_POWER_TOPIC = f"{ZMAI_TOPIC_PREFIX}/power/get"
 ZMAI_VOLTAGE_TOPIC = f"{ZMAI_TOPIC_PREFIX}/voltage/get"
@@ -23,8 +21,6 @@ NPE_BATTERY_STALE_SECONDS = 30
 GRID_VOLTAGE_THRESHOLD_V = 50
 ZMAI_STALE_SECONDS = 15
 
-# by-id, not /dev/ttyUSB0: the adapter renumbers on replug and the hardcoded path
-# left the inverter silent. this symlink follows the FTDI chip's serial number.
 INVERTER_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0"
 INVERTER_BAUD = 2400
 INVERTER_STALE_SECONDS = 30
@@ -53,12 +49,10 @@ AVAILABILITY_TOPIC = f"{BASE_TOPIC}/status"
 
 
 class ZmaiMeter:
-    """Grid meter fed by MQTT pushes, not polled.
+    """Grid meter fed by MQTT pushes from a ZMAi-90 (OpenBeken + RN8209).
 
     The meter publishes on its own schedule, so freshness is tracked from message
-    arrival rather than from a poll returning. A meter that stops publishing goes
-    stale on its own and drops out of the bonding decision, same as a Tomzn that
-    stopped answering.
+    arrival rather than from a poll returning.
     """
 
     def __init__(self):
@@ -88,34 +82,6 @@ class ZmaiMeter:
         return (now - self._last_update_time) < stale_seconds
 
 
-def is_number(text):
-    stripped = text.strip()
-    if not stripped:
-        return False
-    if stripped.lstrip("-+").replace(".", "", 1).isdigit():
-        return True
-    return False
-
-
-def is_battery_present(inverter_data):
-    if inverter_data is None:
-        return False
-    if inverter_data.get("battery_voltage_v", 0) > BATTERY_VOLTAGE_PRESENT_V:
-        return True
-    if inverter_data.get("battery_charging_current_a", 0) > BATTERY_CURRENT_NOISE_A:
-        return True
-    if inverter_data.get("battery_discharge_current_a", 0) > BATTERY_CURRENT_NOISE_A:
-        return True
-    if inverter_data.get("battery_capacity_pct", 0) > 0:
-        return True
-    ac_input_voltage = inverter_data.get("ac_input_voltage_v", 0)
-    pv_power = inverter_data.get("pv1_power_w", 0)
-    output_power = inverter_data.get("ac_output_power_w", 0)
-    if ac_input_voltage < GRID_VOLTAGE_THRESHOLD_V and pv_power < 10 and output_power > BATTERY_OUTPUT_FLOOR_W:
-        return True
-    return False
-
-
 class NpeBonding:
     def __init__(self, pin, threshold_w, stable_seconds, battery_stale_seconds):
         self._threshold_w = threshold_w
@@ -136,9 +102,6 @@ class NpeBonding:
             self._low_power_since = None
             return False
 
-        # Inverter serial reads fail intermittently (EMI while inverting), which drops
-        # battery_power_w to None for a cycle. Hold the last known reading for a grace
-        # window instead of losing the failsafe signal on every transient read error.
         if battery_power_w is not None:
             self._last_battery_power_w = battery_power_w
             self._last_battery_update_time = now
@@ -149,14 +112,8 @@ class NpeBonding:
         held_battery_power_w = self._last_battery_power_w if battery_reading_is_recent else None
 
         grid_absent_by_inverter = ac_input_voltage_v is not None and ac_input_voltage_v < GRID_VOLTAGE_THRESHOLD_V
-        # Under the threshold means the inverter has transferred to PV/battery and its
-        # output is no longer bonded by the grid. Relay open means we islanded the house
-        # deliberately. The meter's voltage is useless here: it reads the line side and
-        # stays live even with the relay open.
         grid_relay_is_open = grid_relay_is_on is not None and not grid_relay_is_on
         grid_absent_by_meter = grid_relay_is_open or (grid_power_w is not None and grid_power_w < self._threshold_w)
-        # Meter offline drops our main off-grid signal. Battery discharging while the
-        # meter is unreachable is itself evidence of an unbonded off-grid fault.
         grid_absent_by_battery_failsafe = (
             not grid_online and held_battery_power_w is not None and held_battery_power_w > self._threshold_w
         )
@@ -191,11 +148,7 @@ class NpeBonding:
 
 
 class Alarm:
-    """Logs a fault once on transition, then repeats slowly while it persists.
-
-    A fault printed every 5s poll buries itself: the dead-inverter fault logged 75977
-    identical lines and nobody saw it. Transitions are the signal, not the repetition.
-    """
+    """Logs a fault once on transition, then repeats slowly while it persists."""
 
     def __init__(self, name, repeat_seconds):
         self._name = name
@@ -221,27 +174,11 @@ class Alarm:
         self._last_log_time = now
 
 
-def sd_notify(message):
-    addr = os.environ.get("NOTIFY_SOCKET")
-    if not addr:
-        return
-    if addr.startswith("@"):
-        addr = "\0" + addr[1:]
-    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
-    try:
-        sock.connect(addr)
-        sock.sendall(message.encode())
-    finally:
-        sock.close()
-
-
-class DaxtromnInverter:
+class DaxtromnInverter(PI30Connection):
     """Daxtromn hybrid inverter polled over RS232 (PI30 protocol).
 
-    The inverter leaks its internal Pylon BMS traffic onto the RS232 line. On ~10%
-    of queries this interleaves with the QPIGS response and corrupts the '(' start
-    byte. The poll method retries once, which brings the effective success rate above
-    99%.
+    Extends PI30Connection with QPIGS polling, data staleness tracking, and
+    battery presence detection.
     """
 
     QPIGS_CMD = b"QPIGS\xb7\xa9\r"
@@ -270,36 +207,12 @@ class DaxtromnInverter:
     ]
 
     def __init__(self, port, baud, stale_seconds):
-        self._port = port
-        self._baud = baud
+        super().__init__(port, baud)
         self._stale_seconds = stale_seconds
         self._last_success_time = None
         self.last_data = None
 
-    def _query_serial(self):
-        """Send QPIGS and return all raw bytes received, or None if port missing."""
-        if not os.path.exists(self._port):
-            return None
-        connection = serial.Serial(self._port, self._baud, timeout=2)
-        connection.reset_input_buffer()
-        connection.write(self.QPIGS_CMD)
-        raw_response = b""
-        read_deadline = time.time() + 2
-        while time.time() < read_deadline:
-            waiting = connection.in_waiting
-            if waiting > 0:
-                raw_response += connection.read(waiting)
-            else:
-                incoming_byte = connection.read(1)
-                if not incoming_byte:
-                    break
-                raw_response += incoming_byte
-        connection.reset_input_buffer()
-        connection.close()
-        return raw_response
-
     def _parse_qpigs(self, raw_response):
-        """Extract the '('-prefixed PI30 frame and parse its fields."""
         frame_start = raw_response.find(b"(")
         if frame_start < 0:
             return None
@@ -323,12 +236,8 @@ class DaxtromnInverter:
         return parsed_data
 
     def poll(self, now):
-        """Query QPIGS and return parsed data dict, or None on failure.
-
-        Retries once on a corrupted frame (Pylon BMS interference).
-        """
         for _attempt in range(2):
-            raw_response = self._query_serial()
+            raw_response = self.send_raw_command(self.QPIGS_CMD)
             if raw_response is None:
                 return None
             parsed_data = self._parse_qpigs(raw_response)
@@ -349,217 +258,245 @@ class DaxtromnInverter:
         elapsed = int(time.time() - self._last_success_time)
         return f"silent for {elapsed}s, port {self._port}"
 
+    def is_battery_present(self, inverter_data):
+        if inverter_data is None:
+            return False
+        if inverter_data.get("battery_voltage_v", 0) > BATTERY_VOLTAGE_PRESENT_V:
+            return True
+        if inverter_data.get("battery_charging_current_a", 0) > BATTERY_CURRENT_NOISE_A:
+            return True
+        if inverter_data.get("battery_discharge_current_a", 0) > BATTERY_CURRENT_NOISE_A:
+            return True
+        if inverter_data.get("battery_capacity_pct", 0) > 0:
+            return True
+        ac_input_voltage = inverter_data.get("ac_input_voltage_v", 0)
+        pv_power = inverter_data.get("pv1_power_w", 0)
+        output_power = inverter_data.get("ac_output_power_w", 0)
+        if ac_input_voltage < GRID_VOLTAGE_THRESHOLD_V and pv_power < 10 and output_power > BATTERY_OUTPUT_FLOOR_W:
+            return True
+        return False
 
-def on_mqtt_connect(client, userdata, flags, rc):
-    """Subscriptions and retained discovery do not survive a broker restart.
 
-    paho reconnects on its own, but silently comes back without them, which used to
-    leave the HA mode select dead until the service was restarted. Re-arm both here.
-    """
-    client.publish(AVAILABILITY_TOPIC, "online", retain=True)
-    client.subscribe(NPE_MODE_TOPIC)
-    client.subscribe(PV_EFFICIENCY_TOPIC)
-    client.subscribe(f"{ZMAI_TOPIC_PREFIX}/+/get")  # includes 1/get, the grid relay state
-    publish_discovery(client)
-    print("mqtt connected, subscriptions and discovery re-armed", flush=True)
-
-
-def on_mqtt_message(client, userdata, message):
-    payload = message.payload.decode().strip()
-    if message.topic == NPE_MODE_TOPIC:
-        if payload in NPE_MODES:
-            userdata["npe"].mode = payload
+def sd_notify(message):
+    addr = os.environ.get("NOTIFY_SOCKET")
+    if not addr:
         return
-    if message.topic == PV_EFFICIENCY_TOPIC:
-        if is_number(payload):
-            value = float(payload)
-            if 0.5 <= value <= 1.0:
-                userdata["pv_efficiency"] = value
-                print(f"pv efficiency set to {value}", flush=True)
-        return
-    userdata["zmai"].on_message(message.topic, payload, time.time())
+    if addr.startswith("@"):
+        addr = "\0" + addr[1:]
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+    try:
+        sock.connect(addr)
+        sock.sendall(message.encode())
+    finally:
+        sock.close()
 
 
-def publish_discovery(client):
-    device_info = {"identifiers": [DEVICE_ID], "name": "rasp", "manufacturer": "Daxtromn/ZMAi-90"}
-    availability = [{"topic": AVAILABILITY_TOPIC, "payload_available": "online", "payload_not_available": "offline"}]
+class SolarMonitor:
+    """Main application: ties together meter, inverter, N-PE bonding, and MQTT."""
 
-    sensors = [
-        ("zmai_power", "Grid Power (ZMAi-90)", f"{BASE_TOPIC}/zmai/power_w", "W", "power"),
-        ("zmai_voltage", "Grid Voltage (ZMAi-90)", f"{BASE_TOPIC}/zmai/voltage_v", "V", "voltage"),
-        ("zmai_current", "Grid Current (ZMAi-90)", f"{BASE_TOPIC}/zmai/current_a", "A", "current"),
-        ("inverter_ac_output_power", "Daxtromn Total Consumption", f"{BASE_TOPIC}/inverter/ac_output_power_w", "W", "power"),
-        ("inverter_pv_input_power", "PV1 Power", f"{BASE_TOPIC}/inverter/pv1_power_w", "W", "power"),
-        ("inverter_ac_input_voltage", "Daxtromn AC Input Voltage", f"{BASE_TOPIC}/inverter/ac_input_voltage_v", "V", "voltage"),
-        ("inverter_pv_input_voltage", "PV1 Input Voltage", f"{BASE_TOPIC}/inverter/pv1_input_voltage_v", "V", "voltage"),
-        ("inverter_battery_capacity", "Battery Capacity", f"{BASE_TOPIC}/inverter/battery_capacity_pct", "%", "battery"),
-        ("battery_power", "Battery", f"{BASE_TOPIC}/derived/battery_power_w", "W", "power"),
-        ("battery_charge_power", "Battery Charge Power", f"{BASE_TOPIC}/derived/battery_charge_power_w", "W", "power"),
-        ("battery_discharge_power", "Battery Discharge Power", f"{BASE_TOPIC}/derived/battery_discharge_power_w", "W", "power"),
-        ("pv2_power", "PV2 Power", f"{BASE_TOPIC}/derived/pv2_power_w", "W", "power"),
-        ("pv_total_power", "PV Total Power", f"{BASE_TOPIC}/derived/pv_total_power_w", "W", "power"),
-    ]
-    for object_id, name, state_topic, unit, device_class in sensors:
-        config = {
-            "name": name,
-            "unique_id": f"{DEVICE_ID}_{object_id}",
-            "state_topic": state_topic,
-            "unit_of_measurement": unit,
-            "device_class": device_class,
-            "state_class": "measurement",
+    def __init__(self):
+        self.zmai = ZmaiMeter()
+        self.npe = NpeBonding(NPE_RELAY_PIN, NPE_BOND_THRESHOLD_W, NPE_BOND_STABLE_SECONDS, NPE_BATTERY_STALE_SECONDS)
+        self.inverter = DaxtromnInverter(INVERTER_PORT, INVERTER_BAUD, INVERTER_STALE_SECONDS)
+        self.inverter_alarm = Alarm("inverter-silent", ALARM_REPEAT_SECONDS)
+        self.failsafe_alarm = Alarm("npe-failsafe-blind", ALARM_REPEAT_SECONDS)
+        self.pv_efficiency = PV_EFFICIENCY_DEFAULT
+        self.client = mqtt.Client()
+
+    def _on_connect(self, client, userdata, flags, rc):
+        client.publish(AVAILABILITY_TOPIC, "online", retain=True)
+        client.subscribe(NPE_MODE_TOPIC)
+        client.subscribe(PV_EFFICIENCY_TOPIC)
+        client.subscribe(f"{ZMAI_TOPIC_PREFIX}/+/get")
+        self._publish_discovery()
+        print("mqtt connected, subscriptions and discovery re-armed", flush=True)
+
+    def _on_message(self, client, userdata, message):
+        payload = message.payload.decode().strip()
+        if message.topic == NPE_MODE_TOPIC:
+            if payload in NPE_MODES:
+                self.npe.mode = payload
+            return
+        if message.topic == PV_EFFICIENCY_TOPIC:
+            if is_number(payload):
+                value = float(payload)
+                if 0.5 <= value <= 1.0:
+                    self.pv_efficiency = value
+                    print(f"pv efficiency set to {value}", flush=True)
+            return
+        self.zmai.on_message(message.topic, payload, time.time())
+
+    def _publish_discovery(self):
+        device_info = {"identifiers": [DEVICE_ID], "name": "rasp", "manufacturer": "Daxtromn/ZMAi-90"}
+        availability = [{"topic": AVAILABILITY_TOPIC, "payload_available": "online", "payload_not_available": "offline"}]
+
+        sensors = [
+            ("zmai_power", "Grid Power (ZMAi-90)", f"{BASE_TOPIC}/zmai/power_w", "W", "power"),
+            ("zmai_voltage", "Grid Voltage (ZMAi-90)", f"{BASE_TOPIC}/zmai/voltage_v", "V", "voltage"),
+            ("zmai_current", "Grid Current (ZMAi-90)", f"{BASE_TOPIC}/zmai/current_a", "A", "current"),
+            ("inverter_ac_output_power", "Daxtromn Total Consumption", f"{BASE_TOPIC}/inverter/ac_output_power_w", "W", "power"),
+            ("inverter_pv_input_power", "PV1 Power", f"{BASE_TOPIC}/inverter/pv1_power_w", "W", "power"),
+            ("inverter_ac_input_voltage", "Daxtromn AC Input Voltage", f"{BASE_TOPIC}/inverter/ac_input_voltage_v", "V", "voltage"),
+            ("inverter_pv_input_voltage", "PV1 Input Voltage", f"{BASE_TOPIC}/inverter/pv1_input_voltage_v", "V", "voltage"),
+            ("inverter_battery_capacity", "Battery Capacity", f"{BASE_TOPIC}/inverter/battery_capacity_pct", "%", "battery"),
+            ("battery_power", "Battery", f"{BASE_TOPIC}/derived/battery_power_w", "W", "power"),
+            ("battery_charge_power", "Battery Charge Power", f"{BASE_TOPIC}/derived/battery_charge_power_w", "W", "power"),
+            ("battery_discharge_power", "Battery Discharge Power", f"{BASE_TOPIC}/derived/battery_discharge_power_w", "W", "power"),
+            ("pv2_power", "PV2 Power", f"{BASE_TOPIC}/derived/pv2_power_w", "W", "power"),
+            ("pv_total_power", "PV Total Power", f"{BASE_TOPIC}/derived/pv_total_power_w", "W", "power"),
+        ]
+        for object_id, name, state_topic, unit, device_class in sensors:
+            config = {
+                "name": name,
+                "unique_id": f"{DEVICE_ID}_{object_id}",
+                "state_topic": state_topic,
+                "unit_of_measurement": unit,
+                "device_class": device_class,
+                "state_class": "measurement",
+                "availability": availability,
+                "device": device_info,
+            }
+            self.client.publish(f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{object_id}/config", json.dumps(config), retain=True)
+
+        zmai_data_config = {
+            "name": "ZMAi-90 Data Status",
+            "unique_id": f"{DEVICE_ID}_zmai_data",
+            "state_topic": f"{BASE_TOPIC}/zmai/data_status",
             "availability": availability,
             "device": device_info,
         }
-        client.publish(f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{object_id}/config", json.dumps(config), retain=True)
+        self.client.publish(f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/zmai_data/config", json.dumps(zmai_data_config), retain=True)
 
-    zmai_data_config = {
-        "name": "ZMAi-90 Data Status",
-        "unique_id": f"{DEVICE_ID}_zmai_data",
-        "state_topic": f"{BASE_TOPIC}/zmai/data_status",
-        "availability": availability,
-        "device": device_info,
-    }
-    client.publish(f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/zmai_data/config", json.dumps(zmai_data_config), retain=True)
+        inverter_data_config = {
+            "name": "Daxtromn Data Status",
+            "unique_id": f"{DEVICE_ID}_inverter_data",
+            "state_topic": f"{BASE_TOPIC}/inverter/data_status",
+            "availability": availability,
+            "device": device_info,
+        }
+        self.client.publish(f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/inverter_data/config", json.dumps(inverter_data_config), retain=True)
 
-    inverter_data_config = {
-        "name": "Daxtromn Data Status",
-        "unique_id": f"{DEVICE_ID}_inverter_data",
-        "state_topic": f"{BASE_TOPIC}/inverter/data_status",
-        "availability": availability,
-        "device": device_info,
-    }
-    client.publish(f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/inverter_data/config", json.dumps(inverter_data_config), retain=True)
+        inverter_problem_config = {
+            "name": "Daxtromn Link Fault",
+            "unique_id": f"{DEVICE_ID}_inverter_fault",
+            "state_topic": f"{BASE_TOPIC}/inverter/data_status",
+            "payload_on": "offline",
+            "payload_off": "online",
+            "device_class": "problem",
+            "availability": availability,
+            "device": device_info,
+        }
+        self.client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/inverter_fault/config", json.dumps(inverter_problem_config), retain=True)
 
-    inverter_problem_config = {
-        "name": "Daxtromn Link Fault",
-        "unique_id": f"{DEVICE_ID}_inverter_fault",
-        "state_topic": f"{BASE_TOPIC}/inverter/data_status",
-        "payload_on": "offline",
-        "payload_off": "online",
-        "device_class": "problem",
-        "availability": availability,
-        "device": device_info,
-    }
-    client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/inverter_fault/config", json.dumps(inverter_problem_config), retain=True)
+        failsafe_config = {
+            "name": "N-PE Failsafe Blind",
+            "unique_id": f"{DEVICE_ID}_npe_failsafe",
+            "state_topic": f"{BASE_TOPIC}/npe_bonding/failsafe_status",
+            "payload_on": "blind",
+            "payload_off": "ok",
+            "device_class": "safety",
+            "availability": availability,
+            "device": device_info,
+        }
+        self.client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/npe_failsafe/config", json.dumps(failsafe_config), retain=True)
 
-    failsafe_config = {
-        "name": "N-PE Failsafe Blind",
-        "unique_id": f"{DEVICE_ID}_npe_failsafe",
-        "state_topic": f"{BASE_TOPIC}/npe_bonding/failsafe_status",
-        "payload_on": "blind",
-        "payload_off": "ok",
-        "device_class": "safety",
-        "availability": availability,
-        "device": device_info,
-    }
-    client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/npe_failsafe/config", json.dumps(failsafe_config), retain=True)
+        npe_binary_config = {
+            "name": "N-PE Bonded",
+            "unique_id": f"{DEVICE_ID}_npe_bonded",
+            "state_topic": f"{BASE_TOPIC}/npe_bonding/state",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "availability": availability,
+            "device": device_info,
+        }
+        self.client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/npe_bonded/config", json.dumps(npe_binary_config), retain=True)
 
-    npe_binary_config = {
-        "name": "N-PE Bonded",
-        "unique_id": f"{DEVICE_ID}_npe_bonded",
-        "state_topic": f"{BASE_TOPIC}/npe_bonding/state",
-        "payload_on": "ON",
-        "payload_off": "OFF",
-        "availability": availability,
-        "device": device_info,
-    }
-    client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/npe_bonded/config", json.dumps(npe_binary_config), retain=True)
+        npe_select_config = {
+            "name": "N-PE Bonding Mode",
+            "unique_id": f"{DEVICE_ID}_npe_mode",
+            "state_topic": f"{BASE_TOPIC}/npe_bonding/mode/state",
+            "command_topic": NPE_MODE_TOPIC,
+            "options": list(NPE_MODES),
+            "availability": availability,
+            "device": device_info,
+        }
+        self.client.publish(f"{DISCOVERY_PREFIX}/select/{DEVICE_ID}/npe_mode/config", json.dumps(npe_select_config), retain=True)
 
-    npe_select_config = {
-        "name": "N-PE Bonding Mode",
-        "unique_id": f"{DEVICE_ID}_npe_mode",
-        "state_topic": f"{BASE_TOPIC}/npe_bonding/mode/state",
-        "command_topic": NPE_MODE_TOPIC,
-        "options": list(NPE_MODES),
-        "availability": availability,
-        "device": device_info,
-    }
-    client.publish(f"{DISCOVERY_PREFIX}/select/{DEVICE_ID}/npe_mode/config", json.dumps(npe_select_config), retain=True)
+    def run(self):
+        self.client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
+        self.client.on_connect = self._on_connect
+        self.client.on_message = self._on_message
+        self.client.will_set(AVAILABILITY_TOPIC, "offline", retain=True)
+        self.client.connect(MQTT_HOST, MQTT_PORT)
+        self.client.loop_start()
+
+        print("solar_monitor started", flush=True)
+        sd_notify("READY=1")
+        while True:
+            cycle_start = time.time()
+            sd_notify("WATCHDOG=1")
+            battery_power_w = None
+
+            if self.zmai.power_w is not None:
+                self.client.publish(f"{BASE_TOPIC}/zmai/power_w", self.zmai.power_w)
+            if self.zmai.voltage_v is not None:
+                self.client.publish(f"{BASE_TOPIC}/zmai/voltage_v", self.zmai.voltage_v)
+            if self.zmai.current_a is not None:
+                self.client.publish(f"{BASE_TOPIC}/zmai/current_a", self.zmai.current_a)
+            zmai_online = self.zmai.has_recent_data(cycle_start, ZMAI_STALE_SECONDS)
+            self.client.publish(f"{BASE_TOPIC}/zmai/data_status", "online" if zmai_online else "offline")
+            grid_power_for_decision = self.zmai.power_w if zmai_online else None
+
+            inverter_data = self.inverter.poll(cycle_start)
+            if inverter_data is not None:
+                for key, value in inverter_data.items():
+                    self.client.publish(f"{BASE_TOPIC}/inverter/{key}", value)
+
+                if "battery_voltage_v" in inverter_data and "battery_charging_current_a" in inverter_data and "battery_discharge_current_a" in inverter_data:
+                    battery_power_w = (inverter_data["battery_discharge_current_a"] - inverter_data["battery_charging_current_a"]) * inverter_data["battery_voltage_v"]
+                    self.client.publish(f"{BASE_TOPIC}/derived/battery_power_w", battery_power_w)
+                    self.client.publish(f"{BASE_TOPIC}/derived/battery_charge_power_w", max(-battery_power_w, 0))
+                    self.client.publish(f"{BASE_TOPIC}/derived/battery_discharge_power_w", max(battery_power_w, 0))
+
+                battery_contribution_w = battery_power_w if self.inverter.is_battery_present(inverter_data) else 0.0
+
+                if "ac_output_power_w" in inverter_data and "pv1_power_w" in inverter_data and battery_contribution_w is not None and grid_power_for_decision is not None:
+                    pv_efficiency = self.pv_efficiency
+                    total_pv_w = (inverter_data["ac_output_power_w"] - grid_power_for_decision) / pv_efficiency - battery_contribution_w
+                    pv2_power_w = max(total_pv_w - inverter_data["pv1_power_w"], 0)
+                    self.client.publish(f"{BASE_TOPIC}/derived/pv2_power_w", pv2_power_w)
+                    self.client.publish(f"{BASE_TOPIC}/derived/pv_total_power_w", inverter_data["pv1_power_w"] + pv2_power_w)
+                    self.client.publish(f"{BASE_TOPIC}/pv/efficiency/state", pv_efficiency)
+
+            inverter_online = self.inverter.has_recent_data(cycle_start)
+            self.client.publish(f"{BASE_TOPIC}/inverter/data_status", "online" if inverter_online else "offline")
+            self.inverter_alarm.update(not inverter_online, self.inverter.alarm_detail(), cycle_start)
+
+            ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
+
+            failsafe_blind = not inverter_online and not zmai_online
+            self.client.publish(f"{BASE_TOPIC}/npe_bonding/failsafe_status", "blind" if failsafe_blind else "ok")
+            self.failsafe_alarm.update(failsafe_blind, "inverter and ZMAi-90 both down, N-PE cannot detect grid loss", cycle_start)
+
+            battery_present = self.inverter.is_battery_present(inverter_data)
+            self.client.publish(f"{BASE_TOPIC}/derived/battery_present", "ON" if battery_present else "OFF")
+
+            desired_bond_state = self.npe.decide(ac_input_voltage_v, grid_power_for_decision, self.zmai.relay_is_on, zmai_online, battery_power_w, cycle_start)
+            self.npe.apply(desired_bond_state)
+            self.client.publish(f"{BASE_TOPIC}/npe_bonding/state", "ON" if self.npe.is_bonded else "OFF")
+            for reason_key, reason_value in self.npe.last_reasons.items():
+                self.client.publish(f"{BASE_TOPIC}/npe_bonding/debug/{reason_key}", reason_value)
+            self.client.publish(f"{BASE_TOPIC}/npe_bonding/mode/state", self.npe.mode)
+
+            elapsed = time.time() - cycle_start
+            remaining = POLL_INTERVAL_SECONDS - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
 
 
 def main():
-    zmai = ZmaiMeter()
-    npe = NpeBonding(NPE_RELAY_PIN, NPE_BOND_THRESHOLD_W, NPE_BOND_STABLE_SECONDS, NPE_BATTERY_STALE_SECONDS)
-    inverter = DaxtromnInverter(INVERTER_PORT, INVERTER_BAUD, INVERTER_STALE_SECONDS)
-    inverter_alarm = Alarm("inverter-silent", ALARM_REPEAT_SECONDS)
-    failsafe_alarm = Alarm("npe-failsafe-blind", ALARM_REPEAT_SECONDS)
-
-    userdata = {"npe": npe, "zmai": zmai, "pv_efficiency": PV_EFFICIENCY_DEFAULT}
-    client = mqtt.Client(userdata=userdata)
-    client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
-    client.on_connect = on_mqtt_connect
-    client.on_message = on_mqtt_message
-    client.will_set(AVAILABILITY_TOPIC, "offline", retain=True)
-    client.connect(MQTT_HOST, MQTT_PORT)
-    client.loop_start()
-
-    print("solar_monitor started", flush=True)
-    sd_notify("READY=1")
-    while True:
-        cycle_start = time.time()
-        sd_notify("WATCHDOG=1")
-        battery_power_w = None
-
-        # The meter pushes over MQTT, so there is nothing to poll here; paho's network
-        # thread has already filled these in between cycles.
-        if zmai.power_w is not None:
-            client.publish(f"{BASE_TOPIC}/zmai/power_w", zmai.power_w)
-        if zmai.voltage_v is not None:
-            client.publish(f"{BASE_TOPIC}/zmai/voltage_v", zmai.voltage_v)
-        if zmai.current_a is not None:
-            client.publish(f"{BASE_TOPIC}/zmai/current_a", zmai.current_a)
-        zmai_online = zmai.has_recent_data(cycle_start, ZMAI_STALE_SECONDS)
-        client.publish(f"{BASE_TOPIC}/zmai/data_status", "online" if zmai_online else "offline")
-        grid_power_for_decision = zmai.power_w if zmai_online else None
-
-        inverter_data = inverter.poll(cycle_start)
-        if inverter_data is not None:
-            for key, value in inverter_data.items():
-                client.publish(f"{BASE_TOPIC}/inverter/{key}", value)
-
-            if "battery_voltage_v" in inverter_data and "battery_charging_current_a" in inverter_data and "battery_discharge_current_a" in inverter_data:
-                battery_power_w = (inverter_data["battery_discharge_current_a"] - inverter_data["battery_charging_current_a"]) * inverter_data["battery_voltage_v"]
-                client.publish(f"{BASE_TOPIC}/derived/battery_power_w", battery_power_w)
-                client.publish(f"{BASE_TOPIC}/derived/battery_charge_power_w", max(-battery_power_w, 0))
-                client.publish(f"{BASE_TOPIC}/derived/battery_discharge_power_w", max(battery_power_w, 0))
-
-            battery_contribution_w = battery_power_w if is_battery_present(inverter_data) else 0.0
-
-            if "ac_output_power_w" in inverter_data and "pv1_power_w" in inverter_data and battery_contribution_w is not None and grid_power_for_decision is not None:
-                pv_efficiency = userdata["pv_efficiency"]
-                total_pv_w = (inverter_data["ac_output_power_w"] - grid_power_for_decision) / pv_efficiency - battery_contribution_w
-                pv2_power_w = max(total_pv_w - inverter_data["pv1_power_w"], 0)
-                client.publish(f"{BASE_TOPIC}/derived/pv2_power_w", pv2_power_w)
-                client.publish(f"{BASE_TOPIC}/derived/pv_total_power_w", inverter_data["pv1_power_w"] + pv2_power_w)
-                client.publish(f"{BASE_TOPIC}/pv/efficiency/state", pv_efficiency)
-
-        inverter_online = inverter.has_recent_data(cycle_start)
-        client.publish(f"{BASE_TOPIC}/inverter/data_status", "online" if inverter_online else "offline")
-        inverter_alarm.update(not inverter_online, inverter.alarm_detail(), cycle_start)
-
-        ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
-
-        # Off-grid detection has three independent signals; a dead inverter kills two of
-        # them at once. With the meter also gone nothing can bond N-PE on a grid loss,
-        # so that combination is a hazard in its own right and must be visible.
-        failsafe_blind = not inverter_online and not zmai_online
-        client.publish(f"{BASE_TOPIC}/npe_bonding/failsafe_status", "blind" if failsafe_blind else "ok")
-        failsafe_alarm.update(failsafe_blind, "inverter and ZMAi-90 both down, N-PE cannot detect grid loss", cycle_start)
-
-        battery_present = is_battery_present(inverter_data)
-        client.publish(f"{BASE_TOPIC}/derived/battery_present", "ON" if battery_present else "OFF")
-
-        desired_bond_state = npe.decide(ac_input_voltage_v, grid_power_for_decision, zmai.relay_is_on, zmai_online, battery_power_w, cycle_start)
-        npe.apply(desired_bond_state)
-        client.publish(f"{BASE_TOPIC}/npe_bonding/state", "ON" if npe.is_bonded else "OFF")
-        for reason_key, reason_value in npe.last_reasons.items():
-            client.publish(f"{BASE_TOPIC}/npe_bonding/debug/{reason_key}", reason_value)
-        client.publish(f"{BASE_TOPIC}/npe_bonding/mode/state", npe.mode)
-
-        elapsed = time.time() - cycle_start
-        remaining = POLL_INTERVAL_SECONDS - elapsed
-        if remaining > 0:
-            time.sleep(remaining)
+    monitor = SolarMonitor()
+    monitor.run()
 
 
 if __name__ == "__main__":

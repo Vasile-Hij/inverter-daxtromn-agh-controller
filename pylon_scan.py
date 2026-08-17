@@ -1,43 +1,48 @@
 """Scan for a Pylon-compatible battery across baud rates and addresses."""
 
 import sys
-import serial
+
+from pylon import PylonConnection
 
 PYLON_PORT = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
-PYLON_CID1 = 0x46
-PYLON_CID2_SYSTEM_ANALOG = 0x61
-BAUD_RATES = [115200, 9600, 19200, 2400, 4800, 38400, 57600]
-ADDRESSES = [0x02, 0x12, 0x01, 0x22, 0x00, 0x03, 0x04, 0x32, 0x42]
 
 
-def pylon_ascii_checksum(payload):
-    total = sum(ord(char) for char in payload) % 65536
-    return f"{(~total + 1) & 0xFFFF:04X}"
+class PylonScanner(PylonConnection):
+    """Scans baud rates and addresses to find a Pylon battery.
+
+    Extends PylonConnection with multi-baud, multi-address sweep logic.
+    """
+
+    BAUD_RATES = [115200, 9600, 19200, 2400, 4800, 38400, 57600]
+    SCAN_ADDRESSES = [0x02, 0x12, 0x01, 0x22, 0x00, 0x03, 0x04, 0x32, 0x42]
+    CID2_SYSTEM_ANALOG = 0x61
+
+    def __init__(self, port):
+        super().__init__(port, baud=self.BAUD_RATES[0], address=self.SCAN_ADDRESSES[0], timeout=1)
+
+    def scan(self):
+        for baud in self.BAUD_RATES:
+            print(f"\n=== Baud rate: {baud} ===")
+            for address in self.SCAN_ADDRESSES:
+                self._baud = baud
+                self._address = address
+                self.open()
+                response = self.send_query(self.CID2_SYSTEM_ANALOG)
+                self.close()
+
+                if response:
+                    print(f"  ADR=0x{address:02X}: RESPONSE! {response}")
+                else:
+                    print(f"  ADR=0x{address:02X}: no response")
+
+    def run(self):
+        self.scan()
 
 
-def build_pylon_query(adr, cid2):
-    body = f"20{adr:02X}{PYLON_CID1:02X}{cid2:02X}0000"
-    frame = "~" + body + pylon_ascii_checksum(body) + "\r"
-    return frame.encode("ascii")
-
-
-def scan():
-    for baud in BAUD_RATES:
-        print(f"\n=== Baud rate: {baud} ===")
-        for adr in ADDRESSES:
-            command = build_pylon_query(adr, PYLON_CID2_SYSTEM_ANALOG)
-            connection = serial.Serial(PYLON_PORT, baud, timeout=1)
-            connection.reset_input_buffer()
-            connection.write(command)
-
-            response = connection.read_until(b"\r")
-            connection.close()
-
-            if response:
-                print(f"  ADR=0x{adr:02X}: RESPONSE! {response}")
-            else:
-                print(f"  ADR=0x{adr:02X}: no response")
+def main():
+    scanner = PylonScanner(PYLON_PORT)
+    scanner.run()
 
 
 if __name__ == "__main__":
-    scan()
+    main()
