@@ -1,3 +1,4 @@
+import glob
 import json
 import os
 import socket
@@ -15,7 +16,7 @@ ZMAI_CURRENT_TOPIC = f"{ZMAI_TOPIC_PREFIX}/current/get"
 ZMAI_RELAY_TOPIC = f"{ZMAI_TOPIC_PREFIX}/1/get"
 
 NPE_RELAY_PIN = 27
-NPE_BOND_THRESHOLD_W = 30
+NPE_BOND_THRESHOLD_W = 50
 NPE_BOND_STABLE_SECONDS = 3
 NPE_BATTERY_STALE_SECONDS = 30
 GRID_VOLTAGE_THRESHOLD_V = 50
@@ -27,6 +28,7 @@ INVERTER_STALE_SECONDS = 30
 ALARM_REPEAT_SECONDS = 300
 
 BATTERY_VOLTAGE_PRESENT_V = 20
+BATTERY_LOW_VOLTAGE_V = 44.0
 BATTERY_CURRENT_NOISE_A = 0.5
 BATTERY_OUTPUT_FLOOR_W = 50
 
@@ -94,7 +96,7 @@ class NpeBonding:
         self.mode = NPE_DEFAULT_MODE
         self.last_reasons = {}
 
-    def decide(self, ac_input_voltage_v, grid_power_w, grid_relay_is_on, grid_online, battery_power_w, now):
+    def decide(self, ac_input_voltage_v, grid_power_w, grid_online, battery_power_w, now):
         if self.mode == "manual_on":
             self._low_power_since = None
             return True
@@ -112,8 +114,7 @@ class NpeBonding:
         held_battery_power_w = self._last_battery_power_w if battery_reading_is_recent else None
 
         grid_absent_by_inverter = ac_input_voltage_v is not None and ac_input_voltage_v < GRID_VOLTAGE_THRESHOLD_V
-        grid_relay_is_open = grid_relay_is_on is not None and not grid_relay_is_on
-        grid_absent_by_meter = grid_relay_is_open or (grid_power_w is not None and grid_power_w < self._threshold_w)
+        grid_absent_by_meter = grid_power_w is not None and grid_power_w < self._threshold_w
         grid_absent_by_battery_failsafe = (
             not grid_online and held_battery_power_w is not None and held_battery_power_w > self._threshold_w
         )
@@ -125,7 +126,6 @@ class NpeBonding:
             "grid_absent_by_failsafe": grid_absent_by_battery_failsafe,
             "ac_input_v": ac_input_voltage_v,
             "grid_power_w": grid_power_w,
-            "grid_relay_open": grid_relay_is_open,
         }
 
         if not off_grid_signal:
@@ -300,8 +300,23 @@ class SolarMonitor:
         self.inverter = DaxtromnInverter(INVERTER_PORT, INVERTER_BAUD, INVERTER_STALE_SECONDS)
         self.inverter_alarm = Alarm("inverter-silent", ALARM_REPEAT_SECONDS)
         self.failsafe_alarm = Alarm("npe-failsafe-blind", ALARM_REPEAT_SECONDS)
+        self.battery_low_alarm = Alarm("battery-low-voltage", ALARM_REPEAT_SECONDS)
         self.pv_efficiency = PV_EFFICIENCY_DEFAULT
         self.client = mqtt.Client()
+        self._source_mtimes = self._snapshot_source_mtimes()
+
+    def _snapshot_source_mtimes(self):
+        source_directory = os.path.dirname(os.path.abspath(__file__))
+        source_files = glob.glob(os.path.join(source_directory, "*.py"))
+        return {path: os.path.getmtime(path) for path in source_files}
+
+    def _source_files_changed(self):
+        for path, original_mtime in self._source_mtimes.items():
+            if not os.path.exists(path):
+                continue
+            if os.path.getmtime(path) != original_mtime:
+                return True
+        return False
 
     def _on_connect(self, client, userdata, flags, rc):
         client.publish(AVAILABILITY_TOPIC, "online", retain=True)
@@ -411,6 +426,18 @@ class SolarMonitor:
         }
         self.client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/npe_bonded/config", json.dumps(npe_binary_config), retain=True)
 
+        battery_low_config = {
+            "name": "Battery Low Voltage",
+            "unique_id": f"{DEVICE_ID}_battery_low",
+            "state_topic": f"{BASE_TOPIC}/battery/low_voltage_status",
+            "payload_on": "low",
+            "payload_off": "ok",
+            "device_class": "problem",
+            "availability": availability,
+            "device": device_info,
+        }
+        self.client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/battery_low/config", json.dumps(battery_low_config), retain=True)
+
         npe_select_config = {
             "name": "N-PE Bonding Mode",
             "unique_id": f"{DEVICE_ID}_npe_mode",
@@ -481,12 +508,23 @@ class SolarMonitor:
             battery_present = self.inverter.is_battery_present(inverter_data)
             self.client.publish(f"{BASE_TOPIC}/derived/battery_present", "ON" if battery_present else "OFF")
 
-            desired_bond_state = self.npe.decide(ac_input_voltage_v, grid_power_for_decision, self.zmai.relay_is_on, zmai_online, battery_power_w, cycle_start)
+            battery_voltage = inverter_data.get("battery_voltage_v", 0) if inverter_data is not None else 0
+            battery_is_low = battery_present and battery_voltage < BATTERY_LOW_VOLTAGE_V
+            self.battery_low_alarm.update(battery_is_low, f"battery voltage {battery_voltage}V (threshold {BATTERY_LOW_VOLTAGE_V}V)", cycle_start)
+            self.client.publish(f"{BASE_TOPIC}/battery/low_voltage_status", "low" if battery_is_low else "ok")
+
+            desired_bond_state = self.npe.decide(ac_input_voltage_v, grid_power_for_decision, zmai_online, battery_power_w, cycle_start)
+            if battery_is_low:
+                desired_bond_state = False
             self.npe.apply(desired_bond_state)
             self.client.publish(f"{BASE_TOPIC}/npe_bonding/state", "ON" if self.npe.is_bonded else "OFF")
             for reason_key, reason_value in self.npe.last_reasons.items():
                 self.client.publish(f"{BASE_TOPIC}/npe_bonding/debug/{reason_key}", reason_value)
             self.client.publish(f"{BASE_TOPIC}/npe_bonding/mode/state", self.npe.mode)
+
+            if self._source_files_changed():
+                print("source files changed, restarting", flush=True)
+                return
 
             elapsed = time.time() - cycle_start
             remaining = POLL_INTERVAL_SECONDS - elapsed
