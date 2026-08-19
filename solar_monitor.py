@@ -21,6 +21,9 @@ NPE_BOND_STABLE_SECONDS = 3
 NPE_BATTERY_STALE_SECONDS = 30
 GRID_VOLTAGE_THRESHOLD_V = 50
 ZMAI_STALE_SECONDS = 15
+ZMAI_NOISE_THRESHOLD_W = 20
+PV2_PV1_RATIO_DEFAULT = 0.37
+PV2_RATIO_MIN_PV1_W = 50
 
 INVERTER_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0"
 INVERTER_BAUD = 2400
@@ -32,6 +35,22 @@ BATTERY_LOW_VOLTAGE_V = 44.0
 BATTERY_CURRENT_NOISE_A = 0.5
 BATTERY_OUTPUT_FLOOR_W = 50
 
+# 16S LiFePO4 OCV-to-SOC lookup (voltage_v, soc_pct)
+LIFEPO4_16S_SOC_TABLE = [
+    (44.0, 0),
+    (49.6, 10),
+    (51.2, 20),
+    (52.0, 30),
+    (52.4, 40),
+    (52.6, 50),
+    (52.8, 60),
+    (53.0, 70),
+    (53.3, 80),
+    (53.6, 90),
+    (54.4, 95),
+    (58.4, 100),
+]
+
 POLL_INTERVAL_SECONDS = 5
 
 MQTT_HOST = os.environ["MQTT_HOST"]
@@ -41,11 +60,13 @@ MQTT_PASSWORD = os.environ["MQTT_PASSWORD"]
 BASE_TOPIC = "solar"
 DISCOVERY_PREFIX = "homeassistant"
 DEVICE_ID = "solar_pi"
+UNIQUE_ID_PREFIX = "rasp"
 
 NPE_MODE_TOPIC = f"{BASE_TOPIC}/npe_bonding/mode/set"
 NPE_MODES = ("auto", "manual_on", "manual_off")
 NPE_DEFAULT_MODE = "auto"
 PV_EFFICIENCY_TOPIC = f"{BASE_TOPIC}/pv/efficiency/set"
+PV2_RATIO_TOPIC = f"{BASE_TOPIC}/pv/pv2_ratio/set"
 PV_EFFICIENCY_DEFAULT = 0.93
 AVAILABILITY_TOPIC = f"{BASE_TOPIC}/status"
 
@@ -277,6 +298,21 @@ class DaxtromnInverter(PI30Connection):
         return False
 
 
+def estimate_soc_from_voltage(voltage_v):
+    table = LIFEPO4_16S_SOC_TABLE
+    if voltage_v <= table[0][0]:
+        return table[0][1]
+    if voltage_v >= table[-1][0]:
+        return table[-1][1]
+    for index in range(1, len(table)):
+        if voltage_v <= table[index][0]:
+            low_voltage, low_soc = table[index - 1]
+            high_voltage, high_soc = table[index]
+            fraction = (voltage_v - low_voltage) / (high_voltage - low_voltage)
+            return round(low_soc + fraction * (high_soc - low_soc))
+    return table[-1][1]
+
+
 def sd_notify(message):
     addr = os.environ.get("NOTIFY_SOCKET")
     if not addr:
@@ -302,6 +338,10 @@ class SolarMonitor:
         self.failsafe_alarm = Alarm("npe-failsafe-blind", ALARM_REPEAT_SECONDS)
         self.battery_low_alarm = Alarm("battery-low-voltage", ALARM_REPEAT_SECONDS)
         self.pv_efficiency = PV_EFFICIENCY_DEFAULT
+        self.pv2_pv1_ratio = PV2_PV1_RATIO_DEFAULT
+        self.battery_charge_energy_kwh = 0.0
+        self.battery_discharge_energy_kwh = 0.0
+        self.last_battery_cycle_time = None
         self.client = mqtt.Client()
         self._source_mtimes = self._snapshot_source_mtimes()
 
@@ -322,6 +362,7 @@ class SolarMonitor:
         client.publish(AVAILABILITY_TOPIC, "online", retain=True)
         client.subscribe(NPE_MODE_TOPIC)
         client.subscribe(PV_EFFICIENCY_TOPIC)
+        client.subscribe(PV2_RATIO_TOPIC)
         client.subscribe(f"{ZMAI_TOPIC_PREFIX}/+/get")
         self._publish_discovery()
         print("mqtt connected, subscriptions and discovery re-armed", flush=True)
@@ -339,6 +380,13 @@ class SolarMonitor:
                     self.pv_efficiency = value
                     print(f"pv efficiency set to {value}", flush=True)
             return
+        if message.topic == PV2_RATIO_TOPIC:
+            if is_number(payload):
+                value = float(payload)
+                if 0.1 <= value <= 1.0:
+                    self.pv2_pv1_ratio = value
+                    print(f"pv2/pv1 ratio set to {value}", flush=True)
+            return
         self.zmai.on_message(message.topic, payload, time.time())
 
     def _publish_discovery(self):
@@ -349,21 +397,22 @@ class SolarMonitor:
             ("zmai_power", "Grid Power (ZMAi-90)", f"{BASE_TOPIC}/zmai/power_w", "W", "power"),
             ("zmai_voltage", "Grid Voltage (ZMAi-90)", f"{BASE_TOPIC}/zmai/voltage_v", "V", "voltage"),
             ("zmai_current", "Grid Current (ZMAi-90)", f"{BASE_TOPIC}/zmai/current_a", "A", "current"),
-            ("inverter_ac_output_power", "Daxtromn Total Consumption", f"{BASE_TOPIC}/inverter/ac_output_power_w", "W", "power"),
+            ("inverter_ac_output_power", "Total House Consumption", f"{BASE_TOPIC}/inverter/ac_output_power_w", "W", "power"),
             ("inverter_pv_input_power", "PV1 Power", f"{BASE_TOPIC}/inverter/pv1_power_w", "W", "power"),
             ("inverter_ac_input_voltage", "Daxtromn AC Input Voltage", f"{BASE_TOPIC}/inverter/ac_input_voltage_v", "V", "voltage"),
             ("inverter_pv_input_voltage", "PV1 Input Voltage", f"{BASE_TOPIC}/inverter/pv1_input_voltage_v", "V", "voltage"),
             ("inverter_battery_capacity", "Battery Capacity", f"{BASE_TOPIC}/inverter/battery_capacity_pct", "%", "battery"),
             ("battery_power", "Battery", f"{BASE_TOPIC}/derived/battery_power_w", "W", "power"),
-            ("battery_charge_power", "Battery Charge Power", f"{BASE_TOPIC}/derived/battery_charge_power_w", "W", "power"),
-            ("battery_discharge_power", "Battery Discharge Power", f"{BASE_TOPIC}/derived/battery_discharge_power_w", "W", "power"),
+            ("battery_charge_power", "Battery Charge 14.8kW", f"{BASE_TOPIC}/derived/battery_charge_power_w", "W", "power"),
+            ("battery_discharge_power", "Battery Discharge 14.8kW", f"{BASE_TOPIC}/derived/battery_discharge_power_w", "W", "power"),
+            ("battery_soc_estimated", "Battery SOC (Estimated)", f"{BASE_TOPIC}/derived/battery_soc_estimated_pct", "%", "battery"),
             ("pv2_power", "PV2 Power", f"{BASE_TOPIC}/derived/pv2_power_w", "W", "power"),
             ("pv_total_power", "PV Total Power", f"{BASE_TOPIC}/derived/pv_total_power_w", "W", "power"),
         ]
         for object_id, name, state_topic, unit, device_class in sensors:
             config = {
                 "name": name,
-                "unique_id": f"{DEVICE_ID}_{object_id}",
+                "unique_id": f"{UNIQUE_ID_PREFIX}_{object_id}",
                 "state_topic": state_topic,
                 "unit_of_measurement": unit,
                 "device_class": device_class,
@@ -373,9 +422,26 @@ class SolarMonitor:
             }
             self.client.publish(f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{object_id}/config", json.dumps(config), retain=True)
 
+        energy_sensors = [
+            ("battery_charge_energy", "Battery Charge Energy 14.8kW", f"{BASE_TOPIC}/derived/battery_charge_energy_kwh", "kWh", "energy"),
+            ("battery_discharge_energy", "Battery Discharge Energy 14.8kW", f"{BASE_TOPIC}/derived/battery_discharge_energy_kwh", "kWh", "energy"),
+        ]
+        for object_id, name, state_topic, unit, device_class in energy_sensors:
+            config = {
+                "name": name,
+                "unique_id": f"{UNIQUE_ID_PREFIX}_{object_id}",
+                "state_topic": state_topic,
+                "unit_of_measurement": unit,
+                "device_class": device_class,
+                "state_class": "total_increasing",
+                "availability": availability,
+                "device": device_info,
+            }
+            self.client.publish(f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{object_id}/config", json.dumps(config), retain=True)
+
         zmai_data_config = {
             "name": "ZMAi-90 Data Status",
-            "unique_id": f"{DEVICE_ID}_zmai_data",
+            "unique_id": f"{UNIQUE_ID_PREFIX}_zmai_data",
             "state_topic": f"{BASE_TOPIC}/zmai/data_status",
             "availability": availability,
             "device": device_info,
@@ -384,7 +450,7 @@ class SolarMonitor:
 
         inverter_data_config = {
             "name": "Daxtromn Data Status",
-            "unique_id": f"{DEVICE_ID}_inverter_data",
+            "unique_id": f"{UNIQUE_ID_PREFIX}_inverter_data",
             "state_topic": f"{BASE_TOPIC}/inverter/data_status",
             "availability": availability,
             "device": device_info,
@@ -393,7 +459,7 @@ class SolarMonitor:
 
         inverter_problem_config = {
             "name": "Daxtromn Link Fault",
-            "unique_id": f"{DEVICE_ID}_inverter_fault",
+            "unique_id": f"{UNIQUE_ID_PREFIX}_inverter_fault",
             "state_topic": f"{BASE_TOPIC}/inverter/data_status",
             "payload_on": "offline",
             "payload_off": "online",
@@ -405,7 +471,7 @@ class SolarMonitor:
 
         failsafe_config = {
             "name": "N-PE Failsafe Blind",
-            "unique_id": f"{DEVICE_ID}_npe_failsafe",
+            "unique_id": f"{UNIQUE_ID_PREFIX}_npe_failsafe",
             "state_topic": f"{BASE_TOPIC}/npe_bonding/failsafe_status",
             "payload_on": "blind",
             "payload_off": "ok",
@@ -417,7 +483,7 @@ class SolarMonitor:
 
         npe_binary_config = {
             "name": "N-PE Bonded",
-            "unique_id": f"{DEVICE_ID}_npe_bonded",
+            "unique_id": f"{UNIQUE_ID_PREFIX}_npe_bonded",
             "state_topic": f"{BASE_TOPIC}/npe_bonding/state",
             "payload_on": "ON",
             "payload_off": "OFF",
@@ -428,7 +494,7 @@ class SolarMonitor:
 
         battery_low_config = {
             "name": "Battery Low Voltage",
-            "unique_id": f"{DEVICE_ID}_battery_low",
+            "unique_id": f"{UNIQUE_ID_PREFIX}_battery_low",
             "state_topic": f"{BASE_TOPIC}/battery/low_voltage_status",
             "payload_on": "low",
             "payload_off": "ok",
@@ -440,7 +506,7 @@ class SolarMonitor:
 
         npe_select_config = {
             "name": "N-PE Bonding Mode",
-            "unique_id": f"{DEVICE_ID}_npe_mode",
+            "unique_id": f"{UNIQUE_ID_PREFIX}_npe_mode",
             "state_topic": f"{BASE_TOPIC}/npe_bonding/mode/state",
             "command_topic": NPE_MODE_TOPIC,
             "options": list(NPE_MODES),
@@ -472,7 +538,10 @@ class SolarMonitor:
                 self.client.publish(f"{BASE_TOPIC}/zmai/current_a", self.zmai.current_a)
             zmai_online = self.zmai.has_recent_data(cycle_start, ZMAI_STALE_SECONDS)
             self.client.publish(f"{BASE_TOPIC}/zmai/data_status", "online" if zmai_online else "offline")
-            grid_power_for_decision = self.zmai.power_w if zmai_online else None
+            zmai_has_reading = zmai_online and self.zmai.power_w is not None
+            grid_power_for_npe = self.zmai.power_w if zmai_has_reading else None
+            zmai_power_above_noise = zmai_has_reading and abs(self.zmai.power_w) >= ZMAI_NOISE_THRESHOLD_W
+            grid_power_for_pv2 = self.zmai.power_w if zmai_power_above_noise else None
 
             inverter_data = self.inverter.poll(cycle_start)
             if inverter_data is not None:
@@ -483,16 +552,42 @@ class SolarMonitor:
                     battery_power_w = (inverter_data["battery_discharge_current_a"] - inverter_data["battery_charging_current_a"]) * inverter_data["battery_voltage_v"]
                     self.client.publish(f"{BASE_TOPIC}/derived/battery_power_w", battery_power_w)
                     self.client.publish(f"{BASE_TOPIC}/derived/battery_charge_power_w", max(-battery_power_w, 0))
-                    self.client.publish(f"{BASE_TOPIC}/derived/battery_discharge_power_w", max(battery_power_w, 0))
+                    self.client.publish(f"{BASE_TOPIC}/derived/battery_discharge_power_w", -max(battery_power_w, 0))
+
+                    if self.last_battery_cycle_time is not None:
+                        elapsed_hours = (cycle_start - self.last_battery_cycle_time) / 3600
+                        if battery_power_w < 0:
+                            self.battery_charge_energy_kwh += abs(battery_power_w) * elapsed_hours / 1000
+                        elif battery_power_w > 0:
+                            self.battery_discharge_energy_kwh += battery_power_w * elapsed_hours / 1000
+                        self.client.publish(f"{BASE_TOPIC}/derived/battery_charge_energy_kwh", round(self.battery_charge_energy_kwh, 3))
+                        self.client.publish(f"{BASE_TOPIC}/derived/battery_discharge_energy_kwh", round(self.battery_discharge_energy_kwh, 3))
+                    self.last_battery_cycle_time = cycle_start
 
                 battery_contribution_w = battery_power_w if self.inverter.is_battery_present(inverter_data) else 0.0
 
-                if "ac_output_power_w" in inverter_data and "pv1_power_w" in inverter_data and battery_contribution_w is not None and grid_power_for_decision is not None:
+                if "ac_output_power_w" in inverter_data and "pv1_power_w" in inverter_data and battery_contribution_w is not None:
                     pv_efficiency = self.pv_efficiency
-                    total_pv_w = (inverter_data["ac_output_power_w"] - grid_power_for_decision) / pv_efficiency - battery_contribution_w
-                    pv2_power_w = max(total_pv_w - inverter_data["pv1_power_w"], 0)
+                    pv1_power_w = inverter_data["pv1_power_w"]
+                    ac_output_w = inverter_data["ac_output_power_w"]
+                    total_pv_w = None
+
+                    if grid_power_for_pv2 is not None:
+                        device_status = inverter_data.get("device_status", "00000000")
+                        ac_charging_from_grid = len(device_status) > 7 and device_status[7] == "1"
+                        total_pv_as_import = (ac_output_w - grid_power_for_pv2) / pv_efficiency - battery_contribution_w
+                        if ac_charging_from_grid or total_pv_as_import >= pv1_power_w:
+                            total_pv_w = total_pv_as_import
+
+                    if total_pv_w is None:
+                        total_pv_w = ac_output_w / pv_efficiency - battery_contribution_w
+
+                    if total_pv_w < pv1_power_w and pv1_power_w > PV2_RATIO_MIN_PV1_W:
+                        total_pv_w = pv1_power_w * (1 + self.pv2_pv1_ratio)
+
+                    pv2_power_w = max(total_pv_w - pv1_power_w, 0)
                     self.client.publish(f"{BASE_TOPIC}/derived/pv2_power_w", pv2_power_w)
-                    self.client.publish(f"{BASE_TOPIC}/derived/pv_total_power_w", inverter_data["pv1_power_w"] + pv2_power_w)
+                    self.client.publish(f"{BASE_TOPIC}/derived/pv_total_power_w", pv1_power_w + pv2_power_w)
                     self.client.publish(f"{BASE_TOPIC}/pv/efficiency/state", pv_efficiency)
 
             inverter_online = self.inverter.has_recent_data(cycle_start)
@@ -509,11 +604,14 @@ class SolarMonitor:
             self.client.publish(f"{BASE_TOPIC}/derived/battery_present", "ON" if battery_present else "OFF")
 
             battery_voltage = inverter_data.get("battery_voltage_v", 0) if inverter_data is not None else 0
+            if battery_present and battery_voltage > 0:
+                estimated_soc = estimate_soc_from_voltage(battery_voltage)
+                self.client.publish(f"{BASE_TOPIC}/derived/battery_soc_estimated_pct", estimated_soc)
             battery_is_low = battery_present and battery_voltage < BATTERY_LOW_VOLTAGE_V
             self.battery_low_alarm.update(battery_is_low, f"battery voltage {battery_voltage}V (threshold {BATTERY_LOW_VOLTAGE_V}V)", cycle_start)
             self.client.publish(f"{BASE_TOPIC}/battery/low_voltage_status", "low" if battery_is_low else "ok")
 
-            desired_bond_state = self.npe.decide(ac_input_voltage_v, grid_power_for_decision, zmai_online, battery_power_w, cycle_start)
+            desired_bond_state = self.npe.decide(ac_input_voltage_v, grid_power_for_npe, zmai_online, battery_power_w, cycle_start)
             if battery_is_low:
                 desired_bond_state = False
             self.npe.apply(desired_bond_state)
