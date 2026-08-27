@@ -1,4 +1,4 @@
-# Issues with Daxtromn 10.2kw
+# Issues with Daxtromn 10.2kw AGH version
 - DessMonitor app does not display PV2 for Daxtromn AGH 10.2kw version, just PV1 and total consumption and some settings; Formula I have found in several tests is: pv2 = (ac_output - grid_power) / efficiency - battery_net - pv1.
 	Where:
 	- ac_output = ac_output_power_w (inverter QPIGS)
