@@ -75,6 +75,14 @@ AVAILABILITY_TOPIC = f"{BASE_TOPIC}/status"
 OUTPUT_PRIORITY_MODE_TOPIC = f"{BASE_TOPIC}/output_priority/mode/set"
 OUTPUT_PRIORITY_MODES = ("auto", "force_sbu", "force_sub")
 OUTPUT_PRIORITY_DEFAULT = "auto"
+CHARGER_SOURCE_TOPIC = f"{BASE_TOPIC}/charger_source/set"
+CHARGER_SOURCE_OPTIONS = ("solar_first", "utility_first", "solar_and_utility", "solar_only")
+CHARGER_SOURCE_TO_PCP = {
+    "utility_first": "PCP00",
+    "solar_first": "PCP01",
+    "solar_and_utility": "PCP02",
+    "solar_only": "PCP03",
+}
 
 
 class ZmaiMeter:
@@ -294,6 +302,15 @@ class DaxtromnInverter(PI30Connection):
             return False
         return "ACK" in payload
 
+    def set_charger_source(self, pcp_command):
+        raw_response = self.send_command(pcp_command)
+        if raw_response is None:
+            return False
+        payload = self.extract_payload(raw_response)
+        if payload is None:
+            return False
+        return "ACK" in payload
+
     def is_battery_present(self, inverter_data):
         if inverter_data is None:
             return False
@@ -399,6 +416,8 @@ class SolarMonitor:
         self.battery_low_alarm = Alarm("battery-low-voltage", ALARM_REPEAT_SECONDS)
         self.discharge_guard = BatteryDischargeGuard(BATTERY_DISCHARGE_STOP_SOC_PCT, BATTERY_RESUME_SOC_PCT, PV_RESUME_THRESHOLD_W)
         self._last_applied_priority = None
+        self._last_applied_charger_source = None
+        self._pending_charger_source = None
         self.pv_efficiency = PV_EFFICIENCY_DEFAULT
         self.pv2_pv1_ratio = PV2_PV1_RATIO_DEFAULT
         self.battery_charge_energy_kwh = 0.0
@@ -424,6 +443,7 @@ class SolarMonitor:
         client.publish(AVAILABILITY_TOPIC, "online", retain=True)
         client.subscribe(NPE_MODE_TOPIC)
         client.subscribe(OUTPUT_PRIORITY_MODE_TOPIC)
+        client.subscribe(CHARGER_SOURCE_TOPIC)
         client.subscribe(PV_EFFICIENCY_TOPIC)
         client.subscribe(PV2_RATIO_TOPIC)
         client.subscribe(f"{ZMAI_TOPIC_PREFIX}/+/get")
@@ -440,6 +460,11 @@ class SolarMonitor:
             if payload in OUTPUT_PRIORITY_MODES:
                 self.discharge_guard.mode = payload
                 print(f"output priority mode set to {payload}", flush=True)
+            return
+        if message.topic == CHARGER_SOURCE_TOPIC:
+            if payload in CHARGER_SOURCE_OPTIONS:
+                self._pending_charger_source = payload
+                print(f"charger source requested: {payload}", flush=True)
             return
         if message.topic == PV_EFFICIENCY_TOPIC:
             if is_number(payload):
@@ -614,6 +639,17 @@ class SolarMonitor:
         }
         self.client.publish(f"{DISCOVERY_PREFIX}/select/{DEVICE_ID}/output_priority_mode/config", json.dumps(output_priority_mode_config), retain=True)
 
+        charger_source_config = {
+            "name": "Charger Source",
+            "unique_id": f"{UNIQUE_ID_PREFIX}_charger_source",
+            "state_topic": f"{BASE_TOPIC}/charger_source/state",
+            "command_topic": CHARGER_SOURCE_TOPIC,
+            "options": list(CHARGER_SOURCE_OPTIONS),
+            "availability": availability,
+            "device": device_info,
+        }
+        self.client.publish(f"{DISCOVERY_PREFIX}/select/{DEVICE_ID}/charger_source/config", json.dumps(charger_source_config), retain=True)
+
     def run(self):
         self.client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
         self.client.on_connect = self._on_connect
@@ -722,6 +758,13 @@ class SolarMonitor:
             self.client.publish(f"{BASE_TOPIC}/output_priority/state", self._last_applied_priority or "unknown")
             self.client.publish(f"{BASE_TOPIC}/output_priority/mode/state", self.discharge_guard.mode)
             self.client.publish(f"{BASE_TOPIC}/output_priority/discharge_blocked", "ON" if self.discharge_guard.is_discharge_blocked else "OFF")
+
+            if self._pending_charger_source is not None and self._pending_charger_source != self._last_applied_charger_source:
+                pcp_command = CHARGER_SOURCE_TO_PCP[self._pending_charger_source]
+                if self.inverter.set_charger_source(pcp_command):
+                    self._last_applied_charger_source = self._pending_charger_source
+                    print(f"charger source: {self._last_applied_charger_source}", flush=True)
+            self.client.publish(f"{BASE_TOPIC}/charger_source/state", self._last_applied_charger_source or "unknown")
 
             desired_bond_state = self.npe.decide(ac_input_voltage_v, grid_power_for_npe, zmai_online, battery_power_w, cycle_start)
             if battery_is_low:
