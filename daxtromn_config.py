@@ -34,6 +34,19 @@ class DaxtromnConfigurator(PI30Connection):
         3: "LIb (Lithium)",
     }
 
+    CHARGER_SOURCE_NAMES = {
+        0: "Utility first",
+        1: "Solar first",
+        2: "Solar and Utility",
+        3: "Solar only",
+    }
+
+    OUTPUT_SOURCE_NAMES = {
+        0: "Utility first (USB)",
+        1: "Solar first (SUB)",
+        2: "SBU",
+    }
+
     QPIRI_FIELDS = [
         "ac_input_voltage_v",
         "ac_input_current_a",
@@ -116,6 +129,18 @@ class DaxtromnConfigurator(PI30Connection):
         print(f"  [11] Max AC charge current:    {settings.get('max_ac_charging_current_a', '?')} A")
         print(f"  [02] Max total charge current: {settings.get('max_charging_current_a', '?')} A")
 
+        output_source = settings.get("output_source_priority")
+        if output_source is not None:
+            output_int = int(float(output_source))
+            output_name = DaxtromnConfigurator.OUTPUT_SOURCE_NAMES.get(output_int, "unknown")
+            print(f"  [01] Output source priority:  {output_int} ({output_name})")
+
+        charger_source = settings.get("charger_source_priority")
+        if charger_source is not None:
+            charger_int = int(float(charger_source))
+            charger_name = DaxtromnConfigurator.CHARGER_SOURCE_NAMES.get(charger_int, "unknown")
+            print(f"  [16] Charger source priority: {charger_int} ({charger_name})")
+
     def apply_setting(self, command_text, description):
         print(f"  {description}: {command_text} ... ", end="", flush=True)
         for _attempt in range(3):
@@ -157,6 +182,7 @@ class DaxtromnConfigurator(PI30Connection):
             args.cutoff_voltage is not None,
             args.utility_charge_current is not None,
             args.total_charge_current is not None,
+            args.charger_source is not None,
         ])
 
         if not has_changes:
@@ -185,6 +211,9 @@ class DaxtromnConfigurator(PI30Connection):
         if args.total_charge_current is not None:
             self.apply_setting(f"MCHGC{args.total_charge_current:03d}", "max total charge current")
 
+        if args.charger_source is not None:
+            self.apply_setting(f"PCP{args.charger_source:02d}", "charger source priority")
+
         print("\nverifying:")
         updated_settings = self.query_settings()
         self.display_settings(updated_settings)
@@ -202,6 +231,7 @@ def main():
     parser.add_argument("--cutoff-voltage", type=float, help="low DC cut-off voltage in V (program 29)")
     parser.add_argument("--utility-charge-current", type=int, help="max utility charging current in A (program 11)")
     parser.add_argument("--total-charge-current", type=int, help="max total charging current in A (program 02)")
+    parser.add_argument("--charger-source", type=int, help="charger source priority (0=Utility 1=Solar-first 2=Solar+Utility 3=Solar-only, program 16)")
     parser.add_argument("--raw", help="send a raw PI30 command (e.g. QPIRI, QPIGS)")
 
     args = parser.parse_args()
