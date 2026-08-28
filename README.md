@@ -1,3 +1,6 @@
+# Summary
+Control Daxtromn 10.2kw AGH inverter with 2 MPPT and DAH battery. Added N-PE bonding relay control as Daxtromn is missing feature and fire hazard (flowing 90V on N wire when inverter is not using grid) and calculate missing 2nd PV from MPPT data with and without battery.
+
 # Issues with Daxtromn 10.2kw AGH version
 - DessMonitor app does not display PV2 for Daxtromn AGH 10.2kw version, just PV1 and total consumption and some settings; Formula I have found in several tests is: pv2 = (ac_output - grid_power) / efficiency - battery_net - pv1.
 	Where:
