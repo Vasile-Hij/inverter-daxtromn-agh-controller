@@ -133,11 +133,13 @@ class SolarMonitor:
         if message.topic == OUTPUT_PRIORITY_MODE_TOPIC:
             if payload in OUTPUT_PRIORITY_MODES:
                 self.discharge_guard.mode = payload
+                self.client.publish(f"{BASE_TOPIC}/output_priority/mode/state", payload)
                 print(f"output priority mode set to {payload}", flush=True)
             return
         if message.topic == CHARGER_SOURCE_TOPIC:
             if payload in CHARGER_SOURCE_OPTIONS:
                 self._pending_charger_source = payload
+                self.client.publish(f"{BASE_TOPIC}/charger_source/state", payload)
                 print(f"charger source requested: {payload}", flush=True)
             return
         if message.topic == PV_EFFICIENCY_TOPIC:
@@ -364,6 +366,17 @@ class SolarMonitor:
         self.client.will_set(AVAILABILITY_TOPIC, "offline", retain=True)
         self.client.connect(MQTT_HOST, MQTT_PORT)
         self.client.loop_start()
+
+        initial_priority = self.inverter.query_output_source_priority()
+        if initial_priority is not None:
+            self._last_applied_priority = initial_priority
+            print(f"initial output priority: {initial_priority}", flush=True)
+
+        initial_charger_source = self.inverter.query_charger_source_priority()
+        if initial_charger_source is not None:
+            self._last_applied_charger_source = initial_charger_source
+            self._pending_charger_source = initial_charger_source
+            print(f"initial charger source: {initial_charger_source}", flush=True)
 
         print("solar_monitor started", flush=True)
         sd_notify("READY=1")
