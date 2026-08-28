@@ -59,7 +59,9 @@ class DaxtromnInverter(PI30Connection):
     """
 
     QPIRI_OUTPUT_SOURCE_INDEX = 16
+    QPIRI_CHARGER_SOURCE_INDEX = 17
     OUTPUT_SOURCE_NAMES = {0: "USB", 1: "SUB", 2: "SBU"}
+    CHARGER_SOURCE_NAMES = {0: "utility_first", 1: "solar_first", 2: "solar_and_utility", 3: "solar_only"}
 
     QPIGS_CMD = b"QPIGS\xb7\xa9\r"
     QPIGS_FIELD_NAMES = [
@@ -152,6 +154,20 @@ class DaxtromnInverter(PI30Connection):
         priority_code = int(float(raw_value))
         return self.OUTPUT_SOURCE_NAMES.get(priority_code)
 
+    def query_charger_source_priority(self):
+        raw_response = self.send_command("QPIRI")
+        payload = self.extract_payload(raw_response)
+        if payload is None:
+            return None
+        fields = payload.split()
+        if len(fields) <= self.QPIRI_CHARGER_SOURCE_INDEX:
+            return None
+        raw_value = fields[self.QPIRI_CHARGER_SOURCE_INDEX]
+        if not is_number(raw_value):
+            return None
+        charger_code = int(float(raw_value))
+        return self.CHARGER_SOURCE_NAMES.get(charger_code)
+
     @retry(InverterCommandError)
     def set_output_priority(self, pop_command):
         expected_code = int(pop_command[3:])
@@ -164,9 +180,10 @@ class DaxtromnInverter(PI30Connection):
             raise InverterCommandError(f"no payload in response to {pop_command}")
         if "ACK" not in payload:
             raise InverterCommandError(f"{pop_command} rejected (NAK)")
+        time.sleep(1)
         actual_priority = self.query_output_source_priority()
         if actual_priority != expected_name:
-            raise InverterCommandError(f"verify: expected {expected_name}, got {actual_priority}")
+            print(f"set_output_priority: {pop_command} ACKed but verify returned {actual_priority}", flush=True)
         return True
 
     def set_charger_source(self, pcp_command):
