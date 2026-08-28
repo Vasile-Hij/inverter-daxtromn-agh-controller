@@ -5,21 +5,18 @@ import socket
 import time
 
 import paho.mqtt.client as mqtt
-from gpiozero import DigitalOutputDevice
 
-from pi30 import PI30Connection, is_number
-
-ZMAI_TOPIC_PREFIX = "energy-smart-meter-zmai-90"
-ZMAI_POWER_TOPIC = f"{ZMAI_TOPIC_PREFIX}/power/get"
-ZMAI_VOLTAGE_TOPIC = f"{ZMAI_TOPIC_PREFIX}/voltage/get"
-ZMAI_CURRENT_TOPIC = f"{ZMAI_TOPIC_PREFIX}/current/get"
-ZMAI_RELAY_TOPIC = f"{ZMAI_TOPIC_PREFIX}/1/get"
+from pi30 import is_number
+from alarm import Alarm
+from discharge_guard import BatteryDischargeGuard, OUTPUT_PRIORITY_MODES, OUTPUT_PRIORITY_DEFAULT
+from inverter import DaxtromnInverter, COMMAND_MAX_RETRIES, estimate_soc_from_voltage
+from npe_bonding import NpeBonding
+from zmai_meter import ZmaiMeter, ZMAI_TOPIC_PREFIX
 
 NPE_RELAY_PIN = 27
 NPE_BOND_THRESHOLD_W = 50
 NPE_BOND_STABLE_SECONDS = 3
 NPE_BATTERY_STALE_SECONDS = 30
-GRID_VOLTAGE_THRESHOLD_V = 50
 ZMAI_STALE_SECONDS = 15
 ZMAI_NOISE_THRESHOLD_W = 20
 PV2_PV1_RATIO_DEFAULT = 0.37
@@ -30,29 +27,10 @@ INVERTER_BAUD = 2400
 INVERTER_STALE_SECONDS = 30
 ALARM_REPEAT_SECONDS = 300
 
-BATTERY_VOLTAGE_PRESENT_V = 20
 BATTERY_LOW_VOLTAGE_V = 44.0
-BATTERY_CURRENT_NOISE_A = 0.5
-BATTERY_OUTPUT_FLOOR_W = 50
-BATTERY_DISCHARGE_STOP_SOC_PCT = 7
+BATTERY_DISCHARGE_STOP_SOC_PCT = 10
 BATTERY_RESUME_SOC_PCT = 50
 PV_RESUME_THRESHOLD_W = 200
-
-# 16S LiFePO4 OCV-to-SOC lookup (voltage_v, soc_pct)
-LIFEPO4_16S_SOC_TABLE = [
-    (44.0, 0),
-    (49.6, 10),
-    (51.2, 20),
-    (52.0, 30),
-    (52.4, 40),
-    (52.6, 50),
-    (52.8, 60),
-    (53.0, 70),
-    (53.3, 80),
-    (53.6, 90),
-    (54.4, 95),
-    (58.4, 100),
-]
 
 POLL_INTERVAL_SECONDS = 5
 
@@ -73,9 +51,8 @@ PV2_RATIO_TOPIC = f"{BASE_TOPIC}/pv/pv2_ratio/set"
 PV_EFFICIENCY_DEFAULT = 0.93
 AVAILABILITY_TOPIC = f"{BASE_TOPIC}/status"
 OUTPUT_PRIORITY_MODE_TOPIC = f"{BASE_TOPIC}/output_priority/mode/set"
-OUTPUT_PRIORITY_MODES = ("auto", "force_sbu", "force_sub")
-OUTPUT_PRIORITY_DEFAULT = "auto"
 CHARGER_SOURCE_TOPIC = f"{BASE_TOPIC}/charger_source/set"
+DISCHARGE_STOP_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_stop_soc/set"
 CHARGER_SOURCE_OPTIONS = ("solar_first", "utility_first", "solar_and_utility", "solar_only")
 CHARGER_SOURCE_TO_PCP = {
     "utility_first": "PCP00",
@@ -83,311 +60,6 @@ CHARGER_SOURCE_TO_PCP = {
     "solar_and_utility": "PCP02",
     "solar_only": "PCP03",
 }
-
-
-class ZmaiMeter:
-    """Grid meter fed by MQTT pushes from a ZMAi-90 (OpenBeken + RN8209).
-
-    The meter publishes on its own schedule, so freshness is tracked from message
-    arrival rather than from a poll returning.
-    """
-
-    def __init__(self):
-        self.power_w = None
-        self.voltage_v = None
-        self.current_a = None
-        self.relay_is_on = None
-        self._last_update_time = None
-
-    def on_message(self, topic, payload, now):
-        if not is_number(payload):
-            return
-        value = float(payload)
-        if topic == ZMAI_POWER_TOPIC:
-            self.power_w = value
-            self._last_update_time = now
-        elif topic == ZMAI_VOLTAGE_TOPIC:
-            self.voltage_v = value
-        elif topic == ZMAI_CURRENT_TOPIC:
-            self.current_a = value
-        elif topic == ZMAI_RELAY_TOPIC:
-            self.relay_is_on = value != 0
-
-    def has_recent_data(self, now, stale_seconds):
-        if self._last_update_time is None:
-            return False
-        return (now - self._last_update_time) < stale_seconds
-
-
-class NpeBonding:
-    def __init__(self, pin, threshold_w, stable_seconds, battery_stale_seconds):
-        self._threshold_w = threshold_w
-        self._stable_seconds = stable_seconds
-        self._battery_stale_seconds = battery_stale_seconds
-        self._relay = DigitalOutputDevice(pin, active_high=True, initial_value=False)
-        self._low_power_since = None
-        self._last_battery_power_w = None
-        self._last_battery_update_time = None
-        self.mode = NPE_DEFAULT_MODE
-        self.last_reasons = {}
-
-    def decide(self, ac_input_voltage_v, grid_power_w, grid_online, battery_power_w, now):
-        if self.mode == "manual_on":
-            self._low_power_since = None
-            return True
-        if self.mode == "manual_off":
-            self._low_power_since = None
-            return False
-
-        if battery_power_w is not None:
-            self._last_battery_power_w = battery_power_w
-            self._last_battery_update_time = now
-        battery_reading_is_recent = (
-            self._last_battery_update_time is not None
-            and (now - self._last_battery_update_time) < self._battery_stale_seconds
-        )
-        held_battery_power_w = self._last_battery_power_w if battery_reading_is_recent else None
-
-        grid_absent_by_inverter = ac_input_voltage_v is not None and ac_input_voltage_v < GRID_VOLTAGE_THRESHOLD_V
-        grid_absent_by_meter = grid_power_w is not None and grid_power_w < self._threshold_w
-        grid_absent_by_battery_failsafe = (
-            not grid_online and held_battery_power_w is not None and held_battery_power_w > self._threshold_w
-        )
-        off_grid_signal = grid_absent_by_inverter or grid_absent_by_meter or grid_absent_by_battery_failsafe
-
-        self.last_reasons = {
-            "grid_absent_by_inverter": grid_absent_by_inverter,
-            "grid_absent_by_meter": grid_absent_by_meter,
-            "grid_absent_by_failsafe": grid_absent_by_battery_failsafe,
-            "ac_input_v": ac_input_voltage_v,
-            "grid_power_w": grid_power_w,
-        }
-
-        if not off_grid_signal:
-            self._low_power_since = None
-            return False
-
-        if self._low_power_since is None:
-            self._low_power_since = now
-        return (now - self._low_power_since) >= self._stable_seconds
-
-    def apply(self, desired_state):
-        if desired_state and not self._relay.value:
-            self._relay.on()
-        elif not desired_state and self._relay.value:
-            self._relay.off()
-
-    @property
-    def is_bonded(self):
-        return bool(self._relay.value)
-
-
-class Alarm:
-    """Logs a fault once on transition, then repeats slowly while it persists."""
-
-    def __init__(self, name, repeat_seconds):
-        self._name = name
-        self._repeat_seconds = repeat_seconds
-        self._last_log_time = None
-        self.active = False
-
-    def update(self, is_faulted, detail, now):
-        if not is_faulted:
-            if self.active:
-                print(f"ALARM CLEARED [{self._name}]", flush=True)
-            self.active = False
-            self._last_log_time = None
-            return
-
-        if not self.active:
-            print(f"ALARM RAISED [{self._name}] {detail}", flush=True)
-        elif (now - self._last_log_time) >= self._repeat_seconds:
-            print(f"ALARM ACTIVE [{self._name}] {detail}", flush=True)
-        else:
-            return
-        self.active = True
-        self._last_log_time = now
-
-
-class DaxtromnInverter(PI30Connection):
-    """Daxtromn hybrid inverter polled over RS232 (PI30 protocol).
-
-    Extends PI30Connection with QPIGS polling, data staleness tracking, and
-    battery presence detection.
-    """
-
-    QPIGS_CMD = b"QPIGS\xb7\xa9\r"
-    QPIGS_FIELD_NAMES = [
-        "ac_input_voltage_v",
-        "ac_input_frequency_hz",
-        "ac_output_voltage_v",
-        "ac_output_frequency_hz",
-        "ac_output_apparent_power_va",
-        "ac_output_power_w",
-        "ac_output_load_pct",
-        "bus_voltage_v",
-        "battery_voltage_v",
-        "battery_charging_current_a",
-        "battery_capacity_pct",
-        "heatsink_temperature_c",
-        "pv1_input_current_a",
-        "pv1_input_voltage_v",
-        "battery_voltage_scc_v",
-        "battery_discharge_current_a",
-        "device_status",
-        "rsv1",
-        "rsv2",
-        "pv1_power_w",
-        "rsv3",
-    ]
-
-    def __init__(self, port, baud, stale_seconds):
-        super().__init__(port, baud)
-        self._stale_seconds = stale_seconds
-        self._last_success_time = None
-        self.last_data = None
-
-    def _parse_qpigs(self, raw_response):
-        frame_start = raw_response.find(b"(")
-        if frame_start < 0:
-            return None
-        frame_end = raw_response.find(b"\r", frame_start)
-        if frame_end < 0:
-            return None
-        qpigs_payload = raw_response[frame_start + 1 : frame_end]
-
-        response_text = qpigs_payload.decode("ascii", errors="replace")
-        response_fields = response_text.split()
-        if len(response_fields) < len(self.QPIGS_FIELD_NAMES):
-            return None
-
-        parsed_data = {}
-        for field_index, field_name in enumerate(self.QPIGS_FIELD_NAMES):
-            raw_value = response_fields[field_index]
-            if field_name == "device_status":
-                parsed_data[field_name] = raw_value
-            elif is_number(raw_value):
-                parsed_data[field_name] = float(raw_value)
-        return parsed_data
-
-    def poll(self, now):
-        for _attempt in range(2):
-            raw_response = self.send_raw_command(self.QPIGS_CMD)
-            if raw_response is None:
-                return None
-            parsed_data = self._parse_qpigs(raw_response)
-            if parsed_data is not None:
-                self.last_data = parsed_data
-                self._last_success_time = now
-                return parsed_data
-        return None
-
-    def has_recent_data(self, now):
-        if self._last_success_time is None:
-            return False
-        return (now - self._last_success_time) < self._stale_seconds
-
-    def alarm_detail(self):
-        if self._last_success_time is None:
-            return f"no valid read since start, port {self._port}"
-        elapsed = int(time.time() - self._last_success_time)
-        return f"silent for {elapsed}s, port {self._port}"
-
-    def set_output_priority(self, pop_command):
-        raw_response = self.send_command(pop_command)
-        if raw_response is None:
-            return False
-        payload = self.extract_payload(raw_response)
-        if payload is None:
-            return False
-        return "ACK" in payload
-
-    def set_charger_source(self, pcp_command):
-        raw_response = self.send_command(pcp_command)
-        if raw_response is None:
-            return False
-        payload = self.extract_payload(raw_response)
-        if payload is None:
-            return False
-        return "ACK" in payload
-
-    def is_battery_present(self, inverter_data):
-        if inverter_data is None:
-            return False
-        if inverter_data.get("battery_voltage_v", 0) > BATTERY_VOLTAGE_PRESENT_V:
-            return True
-        if inverter_data.get("battery_charging_current_a", 0) > BATTERY_CURRENT_NOISE_A:
-            return True
-        if inverter_data.get("battery_discharge_current_a", 0) > BATTERY_CURRENT_NOISE_A:
-            return True
-        if inverter_data.get("battery_capacity_pct", 0) > 0:
-            return True
-        ac_input_voltage = inverter_data.get("ac_input_voltage_v", 0)
-        pv_power = inverter_data.get("pv1_power_w", 0)
-        output_power = inverter_data.get("ac_output_power_w", 0)
-        if ac_input_voltage < GRID_VOLTAGE_THRESHOLD_V and pv_power < 10 and output_power > BATTERY_OUTPUT_FLOOR_W:
-            return True
-        return False
-
-
-def estimate_soc_from_voltage(voltage_v):
-    table = LIFEPO4_16S_SOC_TABLE
-    if voltage_v <= table[0][0]:
-        return table[0][1]
-    if voltage_v >= table[-1][0]:
-        return table[-1][1]
-    for index in range(1, len(table)):
-        if voltage_v <= table[index][0]:
-            low_voltage, low_soc = table[index - 1]
-            high_voltage, high_soc = table[index]
-            fraction = (voltage_v - low_voltage) / (high_voltage - low_voltage)
-            return round(low_soc + fraction * (high_soc - low_soc))
-    return table[-1][1]
-
-
-class BatteryDischargeGuard:
-    """Switches output priority to stop battery discharge when SOC is too low.
-
-    In auto mode, sends POP01 (solar-first/SUB) when SOC drops to stop
-    threshold. Resumes SBU only when solar is producing AND battery has
-    charged to resume SOC (default 50%).
-    """
-
-    def __init__(self, stop_soc_pct, resume_soc_pct, pv_resume_threshold_w):
-        self._stop_soc_pct = stop_soc_pct
-        self._resume_soc_pct = resume_soc_pct
-        self._pv_resume_threshold_w = pv_resume_threshold_w
-        self.mode = OUTPUT_PRIORITY_DEFAULT
-        self._discharge_blocked = False
-
-    def decide(self, estimated_soc_pct, battery_present, pv_total_power_w):
-        if self.mode == "force_sbu":
-            self._discharge_blocked = False
-            return "SBU"
-        if self.mode == "force_sub":
-            self._discharge_blocked = True
-            return "SUB"
-
-        if not battery_present:
-            self._discharge_blocked = False
-            return "SBU"
-
-        if self._discharge_blocked:
-            solar_is_producing = pv_total_power_w >= self._pv_resume_threshold_w
-            battery_recovered = estimated_soc_pct >= self._resume_soc_pct
-            if solar_is_producing and battery_recovered:
-                self._discharge_blocked = False
-                return "SBU"
-            return "SUB"
-
-        if estimated_soc_pct <= self._stop_soc_pct:
-            self._discharge_blocked = True
-            return "SUB"
-        return "SBU"
-
-    @property
-    def is_discharge_blocked(self):
-        return self._discharge_blocked
 
 
 def sd_notify(message):
@@ -416,6 +88,7 @@ class SolarMonitor:
         self.battery_low_alarm = Alarm("battery-low-voltage", ALARM_REPEAT_SECONDS)
         self.discharge_guard = BatteryDischargeGuard(BATTERY_DISCHARGE_STOP_SOC_PCT, BATTERY_RESUME_SOC_PCT, PV_RESUME_THRESHOLD_W)
         self._last_applied_priority = None
+        self._output_priority_fault = False
         self._last_applied_charger_source = None
         self._pending_charger_source = None
         self.pv_efficiency = PV_EFFICIENCY_DEFAULT
@@ -446,6 +119,7 @@ class SolarMonitor:
         client.subscribe(CHARGER_SOURCE_TOPIC)
         client.subscribe(PV_EFFICIENCY_TOPIC)
         client.subscribe(PV2_RATIO_TOPIC)
+        client.subscribe(DISCHARGE_STOP_SOC_TOPIC)
         client.subscribe(f"{ZMAI_TOPIC_PREFIX}/+/get")
         self._publish_discovery()
         print("mqtt connected, subscriptions and discovery re-armed", flush=True)
@@ -479,6 +153,13 @@ class SolarMonitor:
                 if 0.1 <= value <= 1.0:
                     self.pv2_pv1_ratio = value
                     print(f"pv2/pv1 ratio set to {value}", flush=True)
+            return
+        if message.topic == DISCHARGE_STOP_SOC_TOPIC:
+            if is_number(payload):
+                value = int(float(payload))
+                if 5 <= value <= 50:
+                    self.discharge_guard.stop_soc_pct = value
+                    print(f"discharge stop SOC set to {value}%", flush=True)
             return
         self.zmai.on_message(message.topic, payload, time.time())
 
@@ -628,6 +309,18 @@ class SolarMonitor:
         }
         self.client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/discharge_blocked/config", json.dumps(discharge_blocked_config), retain=True)
 
+        output_priority_fault_config = {
+            "name": "Output Priority Command Fault",
+            "unique_id": f"{UNIQUE_ID_PREFIX}_output_priority_fault",
+            "state_topic": f"{BASE_TOPIC}/output_priority/command_fault",
+            "payload_on": "ON",
+            "payload_off": "OFF",
+            "device_class": "problem",
+            "availability": availability,
+            "device": device_info,
+        }
+        self.client.publish(f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/output_priority_fault/config", json.dumps(output_priority_fault_config), retain=True)
+
         output_priority_mode_config = {
             "name": "Output Priority Mode",
             "unique_id": f"{UNIQUE_ID_PREFIX}_output_priority_mode",
@@ -649,6 +342,20 @@ class SolarMonitor:
             "device": device_info,
         }
         self.client.publish(f"{DISCOVERY_PREFIX}/select/{DEVICE_ID}/charger_source/config", json.dumps(charger_source_config), retain=True)
+
+        discharge_stop_soc_config = {
+            "name": "Battery Discharge Stop SOC",
+            "unique_id": f"{UNIQUE_ID_PREFIX}_discharge_stop_soc",
+            "state_topic": f"{BASE_TOPIC}/battery/discharge_stop_soc/state",
+            "command_topic": DISCHARGE_STOP_SOC_TOPIC,
+            "min": 5,
+            "max": 50,
+            "step": 1,
+            "unit_of_measurement": "%",
+            "availability": availability,
+            "device": device_info,
+        }
+        self.client.publish(f"{DISCOVERY_PREFIX}/number/{DEVICE_ID}/discharge_stop_soc/config", json.dumps(discharge_stop_soc_config), retain=True)
 
     def run(self):
         self.client.username_pw_set(MQTT_USER, MQTT_PASSWORD)
@@ -748,16 +455,23 @@ class SolarMonitor:
             battery_is_low = battery_present and battery_voltage < BATTERY_LOW_VOLTAGE_V
             self.battery_low_alarm.update(battery_is_low, f"battery voltage {battery_voltage}V (threshold {BATTERY_LOW_VOLTAGE_V}V)", cycle_start)
             self.client.publish(f"{BASE_TOPIC}/battery/low_voltage_status", "low" if battery_is_low else "ok")
+            self.client.publish(f"{BASE_TOPIC}/battery/discharge_stop_soc/state", self.discharge_guard.stop_soc_pct)
 
             desired_priority = self.discharge_guard.decide(estimated_soc, battery_present, pv_total_power_w)
             if desired_priority != self._last_applied_priority:
                 command = "POP02" if desired_priority == "SBU" else "POP01"
                 if self.inverter.set_output_priority(command):
                     self._last_applied_priority = desired_priority
+                    self._output_priority_fault = False
                     print(f"output priority: {desired_priority} (SOC {estimated_soc}%)", flush=True)
+                else:
+                    self._output_priority_fault = True
+                    print(f"ALARM output priority command failed after {COMMAND_MAX_RETRIES} retries: "
+                          f"wanted {desired_priority}", flush=True)
             self.client.publish(f"{BASE_TOPIC}/output_priority/state", self._last_applied_priority or "unknown")
             self.client.publish(f"{BASE_TOPIC}/output_priority/mode/state", self.discharge_guard.mode)
             self.client.publish(f"{BASE_TOPIC}/output_priority/discharge_blocked", "ON" if self.discharge_guard.is_discharge_blocked else "OFF")
+            self.client.publish(f"{BASE_TOPIC}/output_priority/command_fault", "ON" if self._output_priority_fault else "OFF")
 
             if self._pending_charger_source is not None and self._pending_charger_source != self._last_applied_charger_source:
                 pcp_command = CHARGER_SOURCE_TO_PCP[self._pending_charger_source]
