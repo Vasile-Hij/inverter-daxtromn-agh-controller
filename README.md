@@ -78,10 +78,19 @@ SSR relay on GPIO 27 bonds neutral to protective earth when the inverter is isla
 
 | File | Description |
 |------|-------------|
-| `solar_monitor.py` | Main service: inverter polling, MQTT, N-PE bonding logic |
+| `solar_monitor.py` | Main service loop: ties meter, inverter, N-PE bonding, and MQTT together |
+| `settings.py` | Constants, safety thresholds, MQTT topics, and env credentials |
+| `home_assistant.py` | Home Assistant MQTT discovery (all sensor/select/number entities) |
+| `inverter.py` | Daxtromn inverter: QPIGS polling, priority commands, battery detection |
+| `battery.py` | Battery SOC estimation from LiFePO4 open-circuit voltage |
+| `npe_bonding.py` | N-PE bonding relay decision logic and GPIO control |
+| `zmai_meter.py` | ZMAi-90 grid meter state fed by MQTT pushes |
+| `discharge_guard.py` | Switches output priority to protect the battery at low SOC |
+| `alarm.py` | Fault logging with slow repeat while a fault persists |
 | `daxtromn_config.py` | CLI tool to read/write inverter battery settings (QPIRI) |
 | `pylon_battery_test.py` | Diagnostic tool: query Pylon battery system analog data |
 | `pylon_scan.py` | Scan for Pylon batteries across baud rates and addresses |
+| `tomzn_pulse.py` | Diagnostic tool: read Tomzn meter pulse output on GPIO17 |
 | `pi30.py` | Base class for PI30 protocol serial communication |
 | `pylon.py` | Base class for Pylon battery protocol communication |
 

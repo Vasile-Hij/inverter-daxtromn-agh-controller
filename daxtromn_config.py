@@ -18,6 +18,7 @@ from pi30 import PI30Connection, is_number
 
 INVERTER_PORT = "/dev/serial/by-id/usb-FTDI_FT232R_USB_UART_A5069RR4-if00-port0"
 INVERTER_BAUD = 2400
+QUERY_MAX_ATTEMPTS = 3
 
 
 class DaxtromnConfigurator(PI30Connection):
@@ -47,6 +48,8 @@ class DaxtromnConfigurator(PI30Connection):
         2: "SBU",
     }
 
+    NON_NUMERIC_FIELDS = ("machine_type", "device_status")
+
     QPIRI_FIELDS = [
         "ac_input_voltage_v",
         "ac_input_current_a",
@@ -75,11 +78,27 @@ class DaxtromnConfigurator(PI30Connection):
         "pv_power_balance",
     ]
 
-    def __init__(self, port, baud):
-        super().__init__(port, baud)
+    def _all_numeric_fields_valid(self, fields):
+        for index in range(min(len(fields), len(self.QPIRI_FIELDS))):
+            field_name = self.QPIRI_FIELDS[index]
+            if field_name not in self.NON_NUMERIC_FIELDS and not is_number(fields[index]):
+                return False
+        return True
+
+    def _parse_qpiri_fields(self, fields):
+        settings_by_name = {}
+        for index, field_name in enumerate(self.QPIRI_FIELDS):
+            if index >= len(fields):
+                break
+            raw_value = fields[index]
+            if is_number(raw_value):
+                settings_by_name[field_name] = float(raw_value)
+            else:
+                settings_by_name[field_name] = raw_value
+        return settings_by_name
 
     def query_settings(self):
-        for _attempt in range(3):
+        for _attempt in range(QUERY_MAX_ATTEMPTS):
             raw_response = self.send_command("QPIRI")
             payload = self.extract_payload(raw_response)
             if payload is None:
@@ -87,39 +106,26 @@ class DaxtromnConfigurator(PI30Connection):
             fields = payload.split()
             if len(fields) < len(self.QPIRI_FIELDS):
                 continue
-            all_valid = True
-            for index in range(min(len(fields), len(self.QPIRI_FIELDS))):
-                field_name = self.QPIRI_FIELDS[index]
-                if field_name not in ("machine_type", "device_status"):
-                    if not is_number(fields[index]):
-                        all_valid = False
-                        break
-            if not all_valid:
+            if not self._all_numeric_fields_valid(fields):
                 continue
-            settings = {}
-            for index, field_name in enumerate(self.QPIRI_FIELDS):
-                if index >= len(fields):
-                    break
-                raw_value = fields[index]
-                if is_number(raw_value):
-                    settings[field_name] = float(raw_value)
-                else:
-                    settings[field_name] = raw_value
-            return settings
-        print("error: no valid QPIRI response after 3 attempts")
+            return self._parse_qpiri_fields(fields)
+        print(f"error: no valid QPIRI response after {QUERY_MAX_ATTEMPTS} attempts")
         return None
 
-    @staticmethod
-    def display_settings(settings):
+    @classmethod
+    def _display_coded_setting(cls, settings, field_name, label, code_names):
+        raw_code = settings.get(field_name)
+        if raw_code is None:
+            return
+        code = int(float(raw_code))
+        code_name = code_names.get(code, "unknown")
+        print(f"  {label} {code} ({code_name})")
+
+    @classmethod
+    def display_settings(cls, settings):
         if settings is None:
             return
-
-        battery_type_code = settings.get("battery_type")
-        if battery_type_code is not None:
-            type_int = int(float(battery_type_code))
-            type_name = DaxtromnConfigurator.BATTERY_TYPE_NAMES.get(type_int, "unknown")
-            print(f"  [05] Battery type:            {type_int} ({type_name})")
-
+        cls._display_coded_setting(settings, "battery_type", "[05] Battery type:           ", cls.BATTERY_TYPE_NAMES)
         print(f"  [26] Bulk/CV voltage (max):    {settings.get('battery_bulk_cv_voltage_v', '?')} V")
         print(f"  [27] Float voltage:            {settings.get('battery_float_voltage_v', '?')} V")
         print(f"  [29] Under voltage (min):      {settings.get('battery_under_voltage_v', '?')} V")
@@ -128,22 +134,12 @@ class DaxtromnConfigurator(PI30Connection):
         print(f"  [--] Nominal voltage:          {settings.get('battery_nominal_voltage_v', '?')} V")
         print(f"  [11] Max AC charge current:    {settings.get('max_ac_charging_current_a', '?')} A")
         print(f"  [02] Max total charge current: {settings.get('max_charging_current_a', '?')} A")
-
-        output_source = settings.get("output_source_priority")
-        if output_source is not None:
-            output_int = int(float(output_source))
-            output_name = DaxtromnConfigurator.OUTPUT_SOURCE_NAMES.get(output_int, "unknown")
-            print(f"  [01] Output source priority:  {output_int} ({output_name})")
-
-        charger_source = settings.get("charger_source_priority")
-        if charger_source is not None:
-            charger_int = int(float(charger_source))
-            charger_name = DaxtromnConfigurator.CHARGER_SOURCE_NAMES.get(charger_int, "unknown")
-            print(f"  [16] Charger source priority: {charger_int} ({charger_name})")
+        cls._display_coded_setting(settings, "output_source_priority", "[01] Output source priority: ", cls.OUTPUT_SOURCE_NAMES)
+        cls._display_coded_setting(settings, "charger_source_priority", "[16] Charger source priority:", cls.CHARGER_SOURCE_NAMES)
 
     def apply_setting(self, command_text, description):
         print(f"  {description}: {command_text} ... ", end="", flush=True)
-        for _attempt in range(3):
+        for _attempt in range(QUERY_MAX_ATTEMPTS):
             raw_response = self.send_command(command_text)
             if raw_response is None:
                 continue
@@ -156,70 +152,61 @@ class DaxtromnConfigurator(PI30Connection):
             if "NAK" in payload:
                 print("REJECTED")
                 return False
-        print("FAIL (no valid response after 3 attempts)")
+        print(f"FAIL (no valid response after {QUERY_MAX_ATTEMPTS} attempts)")
         return False
+
+    def send_raw_and_print(self, raw_command_text):
+        print(f"sending: {raw_command_text}")
+        raw_response = self.send_command(raw_command_text)
+        if raw_response is None:
+            return
+        print(f"raw: {raw_response}")
+        payload = self.extract_payload(raw_response)
+        if payload is not None:
+            print(f"payload: {payload}")
+
+    @staticmethod
+    def collect_requested_changes(args):
+        possible_changes = [
+            (args.battery_type, "PBT{:02d}", "battery type"),
+            (args.cv_voltage, "PCVV{:04.1f}", "bulk/CV voltage"),
+            (args.float_voltage, "PBFT{:04.1f}", "float voltage"),
+            (args.cutoff_voltage, "PSDV{:04.1f}", "low DC cut-off"),
+            (args.utility_charge_current, "MUCHGC{:03d}", "max utility charge current"),
+            (args.total_charge_current, "MCHGC{:03d}", "max total charge current"),
+            (args.charger_source, "PCP{:02d}", "charger source priority"),
+        ]
+        requested_changes = []
+        for value, command_template, description in possible_changes:
+            if value is not None:
+                requested_changes.append((command_template.format(value), description))
+        return requested_changes
 
     def run(self, args):
         if args.raw:
-            print(f"sending: {args.raw}")
-            raw_response = self.send_command(args.raw)
-            if raw_response is not None:
-                print(f"raw: {raw_response}")
-                payload = self.extract_payload(raw_response)
-                if payload is not None:
-                    print(f"payload: {payload}")
+            self.send_raw_and_print(args.raw)
             return
 
         print(f"port: {self._port}")
-        print(f"\ncurrent settings (QPIRI):")
-        settings = self.query_settings()
-        self.display_settings(settings)
+        print("\ncurrent settings (QPIRI):")
+        self.display_settings(self.query_settings())
 
-        has_changes = any([
-            args.battery_type is not None,
-            args.cv_voltage is not None,
-            args.float_voltage is not None,
-            args.cutoff_voltage is not None,
-            args.utility_charge_current is not None,
-            args.total_charge_current is not None,
-            args.charger_source is not None,
-        ])
-
-        if not has_changes:
+        requested_changes = self.collect_requested_changes(args)
+        if not requested_changes:
             print("\nno changes requested")
             print("example: python3 daxtromn_config.py --battery-type 3 --cv-voltage 57.6 --utility-charge-current 100")
             print("note: with LIb battery type, float voltage (27) and low DC cut-off (29) are locked by the inverter")
             return
 
         print("\napplying:")
-
-        if args.battery_type is not None:
-            self.apply_setting(f"PBT{args.battery_type:02d}", "battery type")
-
-        if args.cv_voltage is not None:
-            self.apply_setting(f"PCVV{args.cv_voltage:04.1f}", "bulk/CV voltage")
-
-        if args.float_voltage is not None:
-            self.apply_setting(f"PBFT{args.float_voltage:04.1f}", "float voltage")
-
-        if args.cutoff_voltage is not None:
-            self.apply_setting(f"PSDV{args.cutoff_voltage:04.1f}", "low DC cut-off")
-
-        if args.utility_charge_current is not None:
-            self.apply_setting(f"MUCHGC{args.utility_charge_current:03d}", "max utility charge current")
-
-        if args.total_charge_current is not None:
-            self.apply_setting(f"MCHGC{args.total_charge_current:03d}", "max total charge current")
-
-        if args.charger_source is not None:
-            self.apply_setting(f"PCP{args.charger_source:02d}", "charger source priority")
+        for command_text, description in requested_changes:
+            self.apply_setting(command_text, description)
 
         print("\nverifying:")
-        updated_settings = self.query_settings()
-        self.display_settings(updated_settings)
+        self.display_settings(self.query_settings())
 
 
-def main():
+def build_argument_parser():
     parser = argparse.ArgumentParser(
         description="Configure Daxtromn inverter battery settings (PI30 protocol)"
     )
@@ -233,15 +220,20 @@ def main():
     parser.add_argument("--total-charge-current", type=int, help="max total charging current in A (program 02)")
     parser.add_argument("--charger-source", type=int, help="charger source priority (0=Utility 1=Solar-first 2=Solar+Utility 3=Solar-only, program 16)")
     parser.add_argument("--raw", help="send a raw PI30 command (e.g. QPIRI, QPIGS)")
+    return parser
 
-    args = parser.parse_args()
 
+def verify_crc_self_test():
     expected_qpigs_crc = 0xB7A9
     computed_qpigs_crc = PI30Connection.compute_crc(b"QPIGS")
     if computed_qpigs_crc != expected_qpigs_crc:
         print(f"CRC self-test failed: expected 0x{expected_qpigs_crc:04X}, got 0x{computed_qpigs_crc:04X}")
         sys.exit(1)
 
+
+def main():
+    args = build_argument_parser().parse_args()
+    verify_crc_self_test()
     configurator = DaxtromnConfigurator(args.port, args.baud)
     configurator.run(args)
 

@@ -29,10 +29,24 @@
 
 **Code**
 - write clean code, no shortcuts or verbosed
-- LBYL with if/else, no EAFB try/except
+- LBYL with if/else, no EAFB try/except (no exceptions raised/caught for flow control)
+- use classes; group related behavior into a class per device or concern
+- descriptive full-word names for functions, variables, and constants; no abbreviations
+  or obfuscated names
+- modular code: one focused module per concern, files under 500 lines of code
+- functions ideally under 20 lines; extract helpers when they grow past that
+- module map: settings.py (constants, thresholds, MQTT topics, env credentials),
+  home_assistant.py (HA MQTT discovery), battery.py (SOC estimation),
+  inverter.py (Daxtromn/PI30 polling and commands), pi30.py (PI30 serial base),
+  npe_bonding.py (relay decision + GPIO), zmai_meter.py (grid meter MQTT state),
+  discharge_guard.py (output priority guard), alarm.py (fault logging),
+  solar_monitor.py (main service loop only)
 
 **Infra**
 - mosquitto runs on the pi, bridged to HA, so a HA restart cannot cut the grid signal
+- the bridge (/etc/mosquitto/conf.d/local.conf) forwards solar/# out but only explicit
+  command topics in; every new HA command topic (.../set) MUST be added there as
+  "topic <topic> in 0" and mosquitto restarted, or HA selects silently do nothing
 - Omada gateway ACL permits VLAN3-IoT -> 10.10.10.20:1883
 - tailscale up after power surge
 - activate this project via sh script
@@ -47,8 +61,9 @@
   pv2 = (ac_output - grid) / 0.93 - battery_net - pv1
   battery_net is (discharge - charge) × voltage; negative when charging.
   battery term is 0 when no battery detected.
-  the 0.85 divisor accounts for DC-AC conversion losses and applies only to the AC-side
-  terms (ac_output - grid), not to battery which is already on the DC bus
+  the 0.93 divisor (pv_efficiency, configurable via MQTT) accounts for DC-AC conversion
+  losses and applies only to the AC-side terms (ac_output - grid), not to battery which
+  is already on the DC bus
 - battery presence is auto-detected every cycle from 5 independent signals:
   1. battery voltage > 20V (direct inverter telemetry)
   2. charging current > 0.5A (battery is charging)
