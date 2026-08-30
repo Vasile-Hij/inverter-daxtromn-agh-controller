@@ -1,54 +1,17 @@
+"""Daxtromn hybrid inverter polled over RS232 (PI30 protocol)."""
+
 import time
-from functools import wraps
 
 from pi30 import PI30Connection, is_number
 from npe_bonding import GRID_VOLTAGE_THRESHOLD_V
 
 COMMAND_MAX_RETRIES = 3
+COMMAND_RETRY_DELAY_SECONDS = 1
 
 BATTERY_VOLTAGE_PRESENT_V = 20
 BATTERY_CURRENT_NOISE_A = 0.5
 BATTERY_OUTPUT_FLOOR_W = 50
-
-# 16S LiFePO4 OCV-to-SOC lookup (voltage_v, soc_pct)
-LIFEPO4_16S_SOC_TABLE = [
-    (44.0, 0),
-    (49.6, 10),
-    (51.2, 20),
-    (52.0, 30),
-    (52.4, 40),
-    (52.6, 50),
-    (52.8, 60),
-    (53.0, 70),
-    (53.3, 80),
-    (53.6, 90),
-    (54.4, 95),
-    (58.4, 100),
-]
-
-
-class InverterCommandError(Exception):
-    pass
-
-
-def retry(exceptions, retries=COMMAND_MAX_RETRIES, delay=1, fail_callback=None):
-    def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            last_exception = None
-            for attempt in range(1, retries + 1):
-                try:
-                    return func(*args, **kwargs)
-                except exceptions as error:
-                    last_exception = error
-                    print(f"{func.__name__} failed (attempt {attempt}/{retries}): {error}", flush=True)
-                    if attempt < retries:
-                        time.sleep(delay)
-            if fail_callback is not None:
-                fail_callback(last_exception)
-            return None
-        return wrapper
-    return decorator
+BATTERY_PV_NOISE_W = 10
 
 
 class DaxtromnInverter(PI30Connection):
@@ -140,60 +103,57 @@ class DaxtromnInverter(PI30Connection):
         elapsed = int(time.time() - self._last_success_time)
         return f"silent for {elapsed}s, port {self._port}"
 
-    def query_output_source_priority(self):
+    def _query_qpiri_field(self, field_index, code_names):
         raw_response = self.send_command("QPIRI")
         payload = self.extract_payload(raw_response)
         if payload is None:
             return None
         fields = payload.split()
-        if len(fields) <= self.QPIRI_OUTPUT_SOURCE_INDEX:
+        if len(fields) <= field_index:
             return None
-        raw_value = fields[self.QPIRI_OUTPUT_SOURCE_INDEX]
+        raw_value = fields[field_index]
         if not is_number(raw_value):
             return None
-        priority_code = int(float(raw_value))
-        return self.OUTPUT_SOURCE_NAMES.get(priority_code)
+        return code_names.get(int(float(raw_value)))
+
+    def query_output_source_priority(self):
+        return self._query_qpiri_field(self.QPIRI_OUTPUT_SOURCE_INDEX, self.OUTPUT_SOURCE_NAMES)
 
     def query_charger_source_priority(self):
-        raw_response = self.send_command("QPIRI")
+        return self._query_qpiri_field(self.QPIRI_CHARGER_SOURCE_INDEX, self.CHARGER_SOURCE_NAMES)
+
+    def _command_failure_reason(self, command_text):
+        raw_response = self.send_command(command_text)
+        if raw_response is None:
+            return f"no response to {command_text}"
         payload = self.extract_payload(raw_response)
         if payload is None:
-            return None
-        fields = payload.split()
-        if len(fields) <= self.QPIRI_CHARGER_SOURCE_INDEX:
-            return None
-        raw_value = fields[self.QPIRI_CHARGER_SOURCE_INDEX]
-        if not is_number(raw_value):
-            return None
-        charger_code = int(float(raw_value))
-        return self.CHARGER_SOURCE_NAMES.get(charger_code)
+            return f"no payload in response to {command_text}"
+        if "ACK" not in payload:
+            return f"{command_text} rejected (NAK)"
+        return None
 
-    @retry(InverterCommandError)
-    def set_output_priority(self, pop_command):
+    def _verify_output_priority(self, pop_command):
         expected_code = int(pop_command[3:])
         expected_name = self.OUTPUT_SOURCE_NAMES.get(expected_code)
-        raw_response = self.send_command(pop_command)
-        if raw_response is None:
-            raise InverterCommandError(f"no response to {pop_command}")
-        payload = self.extract_payload(raw_response)
-        if payload is None:
-            raise InverterCommandError(f"no payload in response to {pop_command}")
-        if "ACK" not in payload:
-            raise InverterCommandError(f"{pop_command} rejected (NAK)")
         time.sleep(1)
         actual_priority = self.query_output_source_priority()
         if actual_priority != expected_name:
             print(f"set_output_priority: {pop_command} ACKed but verify returned {actual_priority}", flush=True)
-        return True
+
+    def set_output_priority(self, pop_command):
+        for attempt in range(1, COMMAND_MAX_RETRIES + 1):
+            failure_reason = self._command_failure_reason(pop_command)
+            if failure_reason is None:
+                self._verify_output_priority(pop_command)
+                return True
+            print(f"set_output_priority failed (attempt {attempt}/{COMMAND_MAX_RETRIES}): {failure_reason}", flush=True)
+            if attempt < COMMAND_MAX_RETRIES:
+                time.sleep(COMMAND_RETRY_DELAY_SECONDS)
+        return False
 
     def set_charger_source(self, pcp_command):
-        raw_response = self.send_command(pcp_command)
-        if raw_response is None:
-            return False
-        payload = self.extract_payload(raw_response)
-        if payload is None:
-            return False
-        return "ACK" in payload
+        return self._command_failure_reason(pcp_command) is None
 
     def is_battery_present(self, inverter_data):
         if inverter_data is None:
@@ -206,24 +166,12 @@ class DaxtromnInverter(PI30Connection):
             return True
         if inverter_data.get("battery_capacity_pct", 0) > 0:
             return True
+        return self._is_powered_without_grid_or_pv(inverter_data)
+
+    @staticmethod
+    def _is_powered_without_grid_or_pv(inverter_data):
         ac_input_voltage = inverter_data.get("ac_input_voltage_v", 0)
         pv_power = inverter_data.get("pv1_power_w", 0)
         output_power = inverter_data.get("ac_output_power_w", 0)
-        if ac_input_voltage < GRID_VOLTAGE_THRESHOLD_V and pv_power < 10 and output_power > BATTERY_OUTPUT_FLOOR_W:
-            return True
-        return False
-
-
-def estimate_soc_from_voltage(voltage_v):
-    table = LIFEPO4_16S_SOC_TABLE
-    if voltage_v <= table[0][0]:
-        return table[0][1]
-    if voltage_v >= table[-1][0]:
-        return table[-1][1]
-    for index in range(1, len(table)):
-        if voltage_v <= table[index][0]:
-            low_voltage, low_soc = table[index - 1]
-            high_voltage, high_soc = table[index]
-            fraction = (voltage_v - low_voltage) / (high_voltage - low_voltage)
-            return round(low_soc + fraction * (high_soc - low_soc))
-    return table[-1][1]
+        grid_is_absent = ac_input_voltage < GRID_VOLTAGE_THRESHOLD_V
+        return grid_is_absent and pv_power < BATTERY_PV_NOISE_W and output_power > BATTERY_OUTPUT_FLOOR_W

@@ -1,7 +1,5 @@
 """Scan for a Pylon-compatible battery across baud rates and addresses."""
 
-import sys
-
 from pylon import PylonConnection
 
 PYLON_PORT = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
@@ -35,13 +33,10 @@ class PylonScanner(PylonConnection):
                 else:
                     print(f"  ADR=0x{address:02X}: no response")
 
-    def run(self):
-        self.scan()
-
 
 def main():
     scanner = PylonScanner(PYLON_PORT)
-    scanner.run()
+    scanner.scan()
 
 
 if __name__ == "__main__":
