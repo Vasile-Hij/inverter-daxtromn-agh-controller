@@ -254,7 +254,8 @@ class SolarMonitor:
                 total_pv_w = total_pv_as_import
         if total_pv_w is None:
             total_pv_w = ac_output_w / self.pv_efficiency - battery_contribution_w
-        if total_pv_w < pv1_power_w and pv1_power_w > settings.PV2_RATIO_MIN_PV1_W:
+        pv2_from_balance_w = total_pv_w - pv1_power_w
+        if pv2_from_balance_w < pv1_power_w * 0.05 and pv1_power_w > settings.PV2_RATIO_MIN_PV1_W:
             total_pv_w = pv1_power_w * (1 + self.pv2_pv1_ratio)
         return total_pv_w
 
