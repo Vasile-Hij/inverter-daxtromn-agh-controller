@@ -64,7 +64,7 @@ SELECTS = [
 
 # (object_id, name, state_topic, command_topic, minimum, maximum, step, unit)
 NUMBERS = [
-    ("discharge_stop_soc", "Battery Discharge Stop SOC", f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state", settings.DISCHARGE_STOP_SOC_TOPIC, 5, 50, 1, "%"),
+    ("discharge_stop_soc", "Battery Discharge Stop SOC", f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state", settings.DISCHARGE_STOP_SOC_TOPIC, 10, 50, 1, "%"),
 ]
 
 
