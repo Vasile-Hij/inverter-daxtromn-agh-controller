@@ -26,7 +26,6 @@ ALARM_REPEAT_SECONDS = 300
 BATTERY_LOW_VOLTAGE_V = 44.0
 BATTERY_DISCHARGE_STOP_SOC_PCT = 10
 BATTERY_RESUME_SOC_PCT = 50
-PV_RESUME_THRESHOLD_W = 200
 
 POLL_INTERVAL_SECONDS = 5
 
@@ -49,6 +48,7 @@ PV_EFFICIENCY_DEFAULT = 0.93
 OUTPUT_PRIORITY_MODE_TOPIC = f"{BASE_TOPIC}/output_priority/mode/set"
 CHARGER_SOURCE_TOPIC = f"{BASE_TOPIC}/charger_source/set"
 DISCHARGE_STOP_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_stop_soc/set"
+DISCHARGE_RESUME_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_resume_soc/set"
 
 CHARGER_SOURCE_OPTIONS = ("solar_first", "utility_first", "solar_and_utility", "solar_only")
 CHARGER_SOURCE_TO_PCP = {
