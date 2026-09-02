@@ -51,7 +51,6 @@ BINARY_SENSORS = [
     ("npe_failsafe", "N-PE Failsafe Blind", f"{settings.BASE_TOPIC}/npe_bonding/failsafe_status", "blind", "ok", "safety"),
     ("npe_bonded", "N-PE Bonded", f"{settings.BASE_TOPIC}/npe_bonding/state", "ON", "OFF", None),
     ("battery_low", "Battery Low Voltage", f"{settings.BASE_TOPIC}/battery/low_voltage_status", "low", "ok", "problem"),
-    ("discharge_blocked", "Battery Discharge Blocked", f"{settings.BASE_TOPIC}/output_priority/discharge_blocked", "ON", "OFF", None),
     ("output_priority_fault", "Output Priority Command Fault", f"{settings.BASE_TOPIC}/output_priority/command_fault", "ON", "OFF", "problem"),
 ]
 
@@ -65,6 +64,7 @@ SELECTS = [
 # (object_id, name, state_topic, command_topic, minimum, maximum, step, unit)
 NUMBERS = [
     ("discharge_stop_soc", "Battery Discharge Stop SOC", f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state", settings.DISCHARGE_STOP_SOC_TOPIC, 10, 50, 1, "%"),
+    ("discharge_resume_soc", "Battery Discharge Resume SOC", f"{settings.BASE_TOPIC}/battery/discharge_resume_soc/state", settings.DISCHARGE_RESUME_SOC_TOPIC, 50, 100, 1, "%"),
 ]
 
 

@@ -53,7 +53,6 @@ class SolarMonitor:
         self.discharge_guard = BatteryDischargeGuard(
             settings.BATTERY_DISCHARGE_STOP_SOC_PCT,
             settings.BATTERY_RESUME_SOC_PCT,
-            settings.PV_RESUME_THRESHOLD_W,
         )
         self.client = mqtt.Client()
         self.discovery = HomeAssistantDiscovery(self.client)
@@ -76,6 +75,7 @@ class SolarMonitor:
             settings.PV_EFFICIENCY_TOPIC: self._handle_pv_efficiency,
             settings.PV2_RATIO_TOPIC: self._handle_pv2_ratio,
             settings.DISCHARGE_STOP_SOC_TOPIC: self._handle_discharge_stop_soc,
+            settings.DISCHARGE_RESUME_SOC_TOPIC: self._handle_discharge_resume_soc,
         }
         self._source_mtimes = self._snapshot_source_mtimes()
 
@@ -149,6 +149,14 @@ class SolarMonitor:
             self.discharge_guard.stop_soc_pct = value
             print(f"discharge stop SOC set to {value}%", flush=True)
 
+    def _handle_discharge_resume_soc(self, payload):
+        if not is_number(payload):
+            return
+        value = int(float(payload))
+        if 50 <= value <= 100:
+            self.discharge_guard.resume_soc_pct = value
+            print(f"discharge resume SOC set to {value}%", flush=True)
+
     def _connect_mqtt(self):
         self.client.username_pw_set(settings.MQTT_USER, settings.MQTT_PASSWORD)
         self.client.on_connect = self._on_connect
@@ -195,7 +203,7 @@ class SolarMonitor:
             pv_total_power_w = self._estimate_pv_power(inverter_data, battery_contribution_w, grid_power_for_pv2)
         self._publish_link_status(zmai_online, now)
         battery_present, estimated_soc, battery_is_low = self._assess_battery(inverter_data, now)
-        self._apply_output_priority(estimated_soc, battery_present, pv_total_power_w)
+        self._apply_output_priority(estimated_soc, battery_present)
         self._apply_charger_source()
         ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
         self._apply_npe_bonding(ac_input_voltage_v, grid_power_for_npe, zmai_online, battery_power_w, battery_is_low, now)
@@ -294,14 +302,15 @@ class SolarMonitor:
         self.battery_low_alarm.update(battery_is_low, f"battery voltage {battery_voltage}V (threshold {settings.BATTERY_LOW_VOLTAGE_V}V)", now)
         self.client.publish(f"{settings.BASE_TOPIC}/battery/low_voltage_status", "low" if battery_is_low else "ok")
         self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state", self.discharge_guard.stop_soc_pct)
+        self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_resume_soc/state", self.discharge_guard.resume_soc_pct)
         return battery_present, estimated_soc, battery_is_low
 
-    def _apply_output_priority(self, estimated_soc, battery_present, pv_total_power_w):
+    def _apply_output_priority(self, estimated_soc, battery_present):
         auto_mode = self.discharge_guard.update_auto_protection(estimated_soc, battery_present)
         if auto_mode is not None:
             self.client.publish(f"{settings.BASE_TOPIC}/output_priority/mode/state", auto_mode)
             print(f"auto-protection: mode -> {auto_mode} (SOC {estimated_soc}%)", flush=True)
-        desired_priority = self.discharge_guard.decide(estimated_soc, battery_present, pv_total_power_w)
+        desired_priority = self.discharge_guard.decide()
         if desired_priority != self.last_applied_priority:
             command = "POP02" if desired_priority == "SBU" else "POP01"
             if self.inverter.set_output_priority(command):
@@ -314,7 +323,6 @@ class SolarMonitor:
                       f"wanted {desired_priority}", flush=True)
         self.client.publish(f"{settings.BASE_TOPIC}/output_priority/state", self.last_applied_priority or "unknown")
         self.client.publish(f"{settings.BASE_TOPIC}/output_priority/mode/state", self.discharge_guard.mode)
-        self.client.publish(f"{settings.BASE_TOPIC}/output_priority/discharge_blocked", "ON" if self.discharge_guard.is_discharge_blocked else "OFF")
         self.client.publish(f"{settings.BASE_TOPIC}/output_priority/command_fault", "ON" if self.output_priority_fault else "OFF")
 
     def _apply_charger_source(self):
