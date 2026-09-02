@@ -115,6 +115,7 @@ class SolarMonitor:
     def _handle_output_priority_mode(self, payload):
         if payload in OUTPUT_PRIORITY_MODES:
             self.discharge_guard.mode = payload
+            self.discharge_guard.clear_auto_protection()
             self.client.publish(f"{settings.BASE_TOPIC}/output_priority/mode/state", payload)
             print(f"output priority mode set to {payload}", flush=True)
 
@@ -144,7 +145,7 @@ class SolarMonitor:
         if not is_number(payload):
             return
         value = int(float(payload))
-        if 5 <= value <= 50:
+        if 10 <= value <= 50:
             self.discharge_guard.stop_soc_pct = value
             print(f"discharge stop SOC set to {value}%", flush=True)
 
@@ -296,6 +297,10 @@ class SolarMonitor:
         return battery_present, estimated_soc, battery_is_low
 
     def _apply_output_priority(self, estimated_soc, battery_present, pv_total_power_w):
+        auto_mode = self.discharge_guard.update_auto_protection(estimated_soc, battery_present)
+        if auto_mode is not None:
+            self.client.publish(f"{settings.BASE_TOPIC}/output_priority/mode/state", auto_mode)
+            print(f"auto-protection: mode -> {auto_mode} (SOC {estimated_soc}%)", flush=True)
         desired_priority = self.discharge_guard.decide(estimated_soc, battery_present, pv_total_power_w)
         if desired_priority != self.last_applied_priority:
             command = "POP02" if desired_priority == "SBU" else "POP01"
