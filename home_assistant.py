@@ -30,6 +30,21 @@ MEASUREMENT_SENSORS = [
     ("battery_soc_estimated", "Battery SOC (Estimated)", f"{settings.BASE_TOPIC}/derived/battery_soc_estimated_pct", "%", "battery"),
     ("pv2_power", "PV2 Power", f"{settings.BASE_TOPIC}/derived/pv2_power_w", "W", "power"),
     ("pv_total_power", "PV Total Power", f"{settings.BASE_TOPIC}/derived/pv_total_power_w", "W", "power"),
+    ("bms_voltage", "BMS Voltage", f"{settings.BASE_TOPIC}/can_battery/bms_voltage_v", "V", "voltage"),
+    ("bms_current", "BMS Current", f"{settings.BASE_TOPIC}/can_battery/bms_current_a", "A", "current"),
+    ("bms_temperature", "BMS Temperature", f"{settings.BASE_TOPIC}/can_battery/bms_temperature_c", "°C", "temperature"),
+    ("bms_soc", "BMS SOC", f"{settings.BASE_TOPIC}/can_battery/bms_soc_pct", "%", "battery"),
+    ("bms_soh", "BMS SOH", f"{settings.BASE_TOPIC}/can_battery/bms_soh_pct", "%", None),
+    ("bms_charge_voltage_limit", "BMS Charge Voltage Limit", f"{settings.BASE_TOPIC}/can_battery/bms_charge_voltage_limit_v", "V", "voltage"),
+    ("bms_charge_current_limit", "BMS Charge Current Limit", f"{settings.BASE_TOPIC}/can_battery/bms_charge_current_limit_a", "A", "current"),
+    ("bms_discharge_current_limit", "BMS Discharge Current Limit", f"{settings.BASE_TOPIC}/can_battery/bms_discharge_current_limit_a", "A", "current"),
+    ("bms_cell_min_voltage", "BMS Cell Min Voltage", f"{settings.BASE_TOPIC}/can_battery/bms_cell_min_mv", "mV", "voltage"),
+    ("bms_cell_max_voltage", "BMS Cell Max Voltage", f"{settings.BASE_TOPIC}/can_battery/bms_cell_max_mv", "mV", "voltage"),
+    ("bms_cell_diff", "BMS Cell Voltage Diff", f"{settings.BASE_TOPIC}/can_battery/bms_cell_diff_mv", "mV", None),
+    ("bms_temp_min", "BMS Temp Min", f"{settings.BASE_TOPIC}/can_battery/bms_temp_min_c", "°C", "temperature"),
+    ("bms_temp_max", "BMS Temp Max", f"{settings.BASE_TOPIC}/can_battery/bms_temp_max_c", "°C", "temperature"),
+    ("bms_capacity", "BMS Capacity", f"{settings.BASE_TOPIC}/can_battery/bms_capacity_ah", "Ah", None),
+    ("bms_module_count", "BMS Module Count", f"{settings.BASE_TOPIC}/can_battery/bms_module_count", None, None),
 ]
 
 # (object_id, name, state_topic, unit, device_class)
@@ -43,6 +58,10 @@ TEXT_SENSORS = [
     ("zmai_data", "ZMAi-90 Data Status", f"{settings.BASE_TOPIC}/zmai/data_status"),
     ("inverter_data", "Daxtromn Data Status", f"{settings.BASE_TOPIC}/inverter/data_status"),
     ("output_priority", "Output Priority", f"{settings.BASE_TOPIC}/output_priority/state"),
+    ("can_battery_data", "CAN Battery Data Status", f"{settings.BASE_TOPIC}/can_battery/data_status"),
+    ("bms_alarms", "BMS Alarms", f"{settings.BASE_TOPIC}/can_battery/bms_alarms"),
+    ("bms_warnings", "BMS Warnings", f"{settings.BASE_TOPIC}/can_battery/bms_warnings"),
+    ("bms_manufacturer", "BMS Manufacturer", f"{settings.BASE_TOPIC}/can_battery/bms_manufacturer"),
 ]
 
 # (object_id, name, state_topic, payload_on, payload_off, device_class or None)
@@ -91,13 +110,16 @@ class HomeAssistantDiscovery:
 
     def _publish_measurement_sensors(self):
         for object_id, name, state_topic, unit, device_class in MEASUREMENT_SENSORS:
-            self._publish_config("sensor", object_id, {
+            entity_config = {
                 "name": name,
                 "state_topic": state_topic,
-                "unit_of_measurement": unit,
-                "device_class": device_class,
                 "state_class": "measurement",
-            })
+            }
+            if unit is not None:
+                entity_config["unit_of_measurement"] = unit
+            if device_class is not None:
+                entity_config["device_class"] = device_class
+            self._publish_config("sensor", object_id, entity_config)
 
     def _publish_energy_sensors(self):
         for object_id, name, state_topic, unit, device_class in ENERGY_SENSORS:
