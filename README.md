@@ -23,6 +23,7 @@ Raspberry Pi-based solar monitoring and N-PE bonding SSR controller for a Daxtro
 - Receives grid power/voltage/current from a ZMAi-90 smart meter over MQTT
 - Derives PV2 power from energy balance (the firmware does not expose PV2 via serial)
 - Auto-detects battery presence from 5 independent inverter signals
+- Reads DAH battery BMS data over CAN bus (SOC, cell voltages, temperatures, alarms)
 - Controls an N-PE bonding relay (GPIO 27) for off-grid safety
 - Publishes all data to Home Assistant via MQTT discovery
 
@@ -32,7 +33,7 @@ Raspberry Pi-based solar monitoring and N-PE bonding SSR controller for a Daxtro
 - Daxtromn AGH-10.2kW hybrid inverter (RS232 via Pylon cable)
 - ZMAi-90 grid meter (deleted from Tuya flashed with BK7231N)
 - N-PE bonding SSR 25A on GPIO 27
-- Optional: DAH LiFePO4 battery (communicates with inverter via CAN or takes partial data from inverter)
+- DAH LiFePO4 16S battery (CAN bus via MCP2515 module)
 
 ## Output
 
@@ -40,7 +41,25 @@ Raspberry Pi-based solar monitoring and N-PE bonding SSR controller for a Daxtro
 
 AC input/output voltage, frequency, power, load %; bus voltage; PV1 voltage, current, power; heatsink temperature; device status bits.
 
-### Battery
+### Battery (CAN bus)
+
+| Metric | Source | CAN ID |
+|--------|--------|--------|
+| SOC (%) | BMS direct | 0x355 |
+| SOH (%) | BMS direct | 0x355 |
+| Pack voltage (V) | BMS direct | 0x356 |
+| Pack current (A) | BMS direct | 0x356 |
+| Pack temperature (C) | BMS direct | 0x356 |
+| Cell min/max voltage (mV) | BMS direct | 0x373 |
+| Cell voltage diff (mV) | Derived from 0x373 | 0x373 |
+| Cell temp min/max (C) | BMS direct | 0x373 |
+| Charge/discharge limits | BMS direct | 0x351 |
+| Alarms and warnings | BMS direct | 0x359 |
+| Charge/discharge enable | BMS direct | 0x35C |
+| Capacity (Ah) | BMS direct | 0x379 |
+| Manufacturer | BMS direct | 0x35E |
+
+### Battery (inverter-derived, fallback)
 
 | Metric | Source |
 |--------|--------|
@@ -78,10 +97,12 @@ SSR relay on GPIO 27 bonds neutral to protective earth when the inverter is isla
 
 | File | Description |
 |------|-------------|
-| `solar_monitor.py` | Main service loop: ties meter, inverter, N-PE bonding, and MQTT together |
+| `solar_monitor.py` | Main service loop: ties meter, inverter, CAN battery, N-PE bonding, and MQTT together |
 | `settings.py` | Constants, safety thresholds, MQTT topics, and env credentials |
 | `home_assistant.py` | Home Assistant MQTT discovery (all sensor/select/number entities) |
 | `inverter.py` | Daxtromn inverter: QPIGS polling, priority commands, battery detection |
+| `can_battery.py` | CAN bus battery reader: socketCAN background thread, data access |
+| `dah_can_protocol.py` | DAH battery CAN frame decoders (SMA/Pylontech-compatible protocol) |
 | `battery.py` | Battery SOC estimation from LiFePO4 open-circuit voltage |
 | `npe_bonding.py` | N-PE bonding relay decision logic and GPIO control |
 | `zmai_meter.py` | ZMAi-90 grid meter state fed by MQTT pushes |
@@ -93,16 +114,72 @@ SSR relay on GPIO 27 bonds neutral to protective earth when the inverter is isla
 | `tomzn_pulse.py` | Diagnostic tool: read Tomzn meter pulse output on GPIO17 |
 | `pi30.py` | Base class for PI30 protocol serial communication |
 | `pylon.py` | Base class for Pylon battery protocol communication |
+| `setup_can.sh` | One-time setup: enables SPI, MCP2515 overlay, and can0 systemd service |
 
 ## Setup
 
+### 1. Install dependencies with uv
+
 ```bash
-python3 -m venv .
-source bin/activate
-uv pip install paho-mqtt pyserial gpiozero
+uv venv
+source .venv/bin/activate
+uv pip install -e .
 ```
 
-Create a `.env` file with MQTT credentials:
+### 2. CAN bus hardware (MCP2515)
+
+#### Wiring
+
+```
+MCP2515 → Pi GPIO          MCP2515 → Battery RJ45
+VCC  → 5V (pin 2)          CAN_H → Pin 4
+GND  → GND (pin 6)         CAN_L → Pin 5
+CS   → GPIO 8 / CE0 (pin 24)
+MOSI → GPIO 10 (pin 19)    120Ω terminator between CAN_H and CAN_L
+MISO → GPIO 9 (pin 21)
+SCK  → GPIO 11 (pin 23)
+INT  → GPIO 25 (pin 22)
+```
+
+#### Enable SPI and MCP2515 overlay
+
+Run the setup script (enables SPI, adds dtoverlay, creates can0 systemd service):
+
+```bash
+sudo bash setup_can.sh
+sudo reboot
+```
+
+After reboot, verify CAN bus:
+
+```bash
+sudo apt install can-utils
+candump can0
+```
+
+You should see frames from the DAH battery (0x351, 0x355, 0x356, 0x359, 0x35C, 0x35E, 0x373, 0x379).
+
+#### Manual setup (alternative)
+
+Edit `/boot/firmware/config.txt`:
+
+```
+# Uncomment in the hardware interfaces section:
+dtparam=spi=on
+
+# Add under [all]:
+dtoverlay=mcp2515-can0,oscillator=8000000,interrupt=25,spimaxfrequency=1000000
+```
+
+Bring up can0 manually:
+
+```bash
+sudo ip link set can0 up type can bitrate 500000
+```
+
+### 3. MQTT credentials
+
+Create a `.env` file:
 
 ```
 MQTT_HOST=127.0.0.1
@@ -139,7 +216,7 @@ sudo systemctl enable solar-monitor
 Run manually (outside systemd):
 
 ```bash
-source bin/activate
+source .venv/bin/activate
 source .env && export MQTT_HOST MQTT_PORT MQTT_USER MQTT_PASSWORD
 python3 solar_monitor.py
 ```
@@ -150,3 +227,18 @@ Configure inverter battery settings:
 python3 daxtromn_config.py
 python3 daxtromn_config.py --battery-type 3 --cv-voltage 57.6
 ```
+
+## DAH CAN Protocol
+
+The DAH battery uses an SMA/Pylontech-compatible CAN protocol at 500kbps. Frame decoders are in `dah_can_protocol.py`.
+
+| CAN ID | Description | Data |
+|--------|-------------|------|
+| 0x351 | Charge/discharge limits | charge_voltage (0.1V), charge_current (0.1A), discharge_current (0.1A), discharge_voltage (0.1V) |
+| 0x355 | State of charge/health | SOC (%), SOH (%) |
+| 0x356 | Pack measurements | voltage (0.01V), current (0.1A), temperature (0.1C) |
+| 0x359 | Alarms and warnings | alarm flags, warning flags, module count |
+| 0x35C | Charge request | charge_enable, discharge_enable, force_charge_request |
+| 0x35E | Manufacturer | ASCII string ("DAH") |
+| 0x373 | Cell min/max | cell_min_mv, cell_max_mv, temp_min (0.1C), temp_max (0.1C) |
+| 0x379 | Capacity | capacity_ah |
