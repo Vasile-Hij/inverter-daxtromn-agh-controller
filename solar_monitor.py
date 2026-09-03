@@ -15,6 +15,7 @@ import paho.mqtt.client as mqtt
 import settings
 from alarm import Alarm
 from battery import estimate_soc_from_voltage
+from can_battery import CanBattery
 from discharge_guard import BatteryDischargeGuard, OUTPUT_PRIORITY_MODES
 from home_assistant import HomeAssistantDiscovery
 from inverter import DaxtromnInverter, COMMAND_MAX_RETRIES
@@ -47,6 +48,7 @@ class SolarMonitor:
             settings.NPE_BATTERY_STALE_SECONDS,
         )
         self.inverter = DaxtromnInverter(settings.INVERTER_PORT, settings.INVERTER_BAUD, settings.INVERTER_STALE_SECONDS)
+        self.can_battery = CanBattery(settings.CAN_INTERFACE, settings.CAN_BATTERY_STALE_SECONDS)
         self.inverter_alarm = Alarm("inverter-silent", settings.ALARM_REPEAT_SECONDS)
         self.failsafe_alarm = Alarm("npe-failsafe-blind", settings.ALARM_REPEAT_SECONDS)
         self.battery_low_alarm = Alarm("battery-low-voltage", settings.ALARM_REPEAT_SECONDS)
@@ -180,6 +182,7 @@ class SolarMonitor:
     def run(self):
         self._connect_mqtt()
         self._load_initial_inverter_state()
+        self.can_battery.start()
         print("solar_monitor started", flush=True)
         notify_systemd("READY=1")
         while True:
@@ -202,6 +205,7 @@ class SolarMonitor:
             battery_contribution_w = battery_power_w if self.inverter.is_battery_present(inverter_data) else 0.0
             pv_total_power_w = self._estimate_pv_power(inverter_data, battery_contribution_w, grid_power_for_pv2)
         self._publish_link_status(zmai_online, now)
+        self._publish_can_battery(now)
         battery_present, estimated_soc, battery_is_low = self._assess_battery(inverter_data, now)
         self._apply_output_priority(estimated_soc, battery_present)
         self._apply_charger_source()
@@ -289,6 +293,15 @@ class SolarMonitor:
         failsafe_blind = not inverter_online and not zmai_online
         self.client.publish(f"{settings.BASE_TOPIC}/npe_bonding/failsafe_status", "blind" if failsafe_blind else "ok")
         self.failsafe_alarm.update(failsafe_blind, "inverter and ZMAi-90 both down, N-PE cannot detect grid loss", now)
+
+    def _publish_can_battery(self, now):
+        can_online = self.can_battery.has_recent_data(now)
+        self.client.publish(f"{settings.BASE_TOPIC}/can_battery/data_status", "online" if can_online else "offline")
+        can_data = self.can_battery.get_data()
+        if can_data is None:
+            return
+        for field_name, field_value in can_data.items():
+            self.client.publish(f"{settings.BASE_TOPIC}/can_battery/{field_name}", field_value)
 
     def _assess_battery(self, inverter_data, now):
         battery_present = self.inverter.is_battery_present(inverter_data)
