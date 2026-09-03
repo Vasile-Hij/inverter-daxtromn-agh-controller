@@ -50,6 +50,9 @@ CHARGER_SOURCE_TOPIC = f"{BASE_TOPIC}/charger_source/set"
 DISCHARGE_STOP_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_stop_soc/set"
 DISCHARGE_RESUME_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_resume_soc/set"
 
+CAN_INTERFACE = "can0"
+CAN_BATTERY_STALE_SECONDS = 30
+
 CHARGER_SOURCE_OPTIONS = ("solar_first", "utility_first", "solar_and_utility", "solar_only")
 CHARGER_SOURCE_TO_PCP = {
     "utility_first": "PCP00",
