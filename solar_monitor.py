@@ -206,7 +206,8 @@ class SolarMonitor:
             pv_total_power_w = self._estimate_pv_power(inverter_data, battery_contribution_w, grid_power_for_pv2)
         self._publish_link_status(zmai_online, now)
         self._publish_can_battery(now)
-        battery_present, estimated_soc, battery_is_low = self._assess_battery(inverter_data, now)
+        can_data = self.can_battery.get_data() if self.can_battery.has_recent_data(now) else None
+        battery_present, estimated_soc, battery_is_low = self._assess_battery(inverter_data, can_data, now)
         self._apply_output_priority(estimated_soc, battery_present)
         self._apply_charger_source()
         ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
@@ -303,16 +304,24 @@ class SolarMonitor:
         for field_name, field_value in can_data.items():
             self.client.publish(f"{settings.BASE_TOPIC}/can_battery/{field_name}", field_value)
 
-    def _assess_battery(self, inverter_data, now):
+    def _assess_battery(self, inverter_data, can_data, now):
         battery_present = self.inverter.is_battery_present(inverter_data)
         self.client.publish(f"{settings.BASE_TOPIC}/derived/battery_present", "ON" if battery_present else "OFF")
-        battery_voltage = inverter_data.get("battery_voltage_v", 0) if inverter_data is not None else 0
-        estimated_soc = 0
-        if battery_present and battery_voltage > 0:
-            estimated_soc = estimate_soc_from_voltage(battery_voltage)
-            self.client.publish(f"{settings.BASE_TOPIC}/derived/battery_soc_estimated_pct", estimated_soc)
-        battery_is_low = battery_present and battery_voltage < settings.BATTERY_LOW_VOLTAGE_V
-        self.battery_low_alarm.update(battery_is_low, f"battery voltage {battery_voltage}V (threshold {settings.BATTERY_LOW_VOLTAGE_V}V)", now)
+        inverter_voltage = inverter_data.get("battery_voltage_v", 0) if inverter_data is not None else 0
+        inverter_soc = 0
+        if battery_present and inverter_voltage > 0:
+            inverter_soc = estimate_soc_from_voltage(inverter_voltage)
+            self.client.publish(f"{settings.BASE_TOPIC}/derived/battery_soc_estimated_pct", inverter_soc)
+        if can_data is not None and "bms_soc_pct" in can_data:
+            estimated_soc = can_data["bms_soc_pct"]
+        else:
+            estimated_soc = inverter_soc
+        if can_data is not None and "bms_voltage_v" in can_data:
+            voltage_for_low_check = can_data["bms_voltage_v"]
+        else:
+            voltage_for_low_check = inverter_voltage
+        battery_is_low = battery_present and voltage_for_low_check < settings.BATTERY_LOW_VOLTAGE_V
+        self.battery_low_alarm.update(battery_is_low, f"battery voltage {voltage_for_low_check}V (threshold {settings.BATTERY_LOW_VOLTAGE_V}V)", now)
         self.client.publish(f"{settings.BASE_TOPIC}/battery/low_voltage_status", "low" if battery_is_low else "ok")
         self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state", self.discharge_guard.stop_soc_pct)
         self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_resume_soc/state", self.discharge_guard.resume_soc_pct)
