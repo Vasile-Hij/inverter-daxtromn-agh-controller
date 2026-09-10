@@ -311,11 +311,12 @@ class SolarMonitor:
         inverter_soc = 0
         if battery_present and inverter_voltage > 0:
             inverter_soc = estimate_soc_from_voltage(inverter_voltage)
-            self.client.publish(f"{settings.BASE_TOPIC}/derived/battery_soc_estimated_pct", inverter_soc)
         if can_data is not None and "bms_soc_pct" in can_data:
             estimated_soc = can_data["bms_soc_pct"]
         else:
             estimated_soc = inverter_soc
+        if battery_present:
+            self.client.publish(f"{settings.BASE_TOPIC}/derived/battery_soc_estimated_pct", estimated_soc)
         if can_data is not None and "bms_voltage_v" in can_data:
             voltage_for_low_check = can_data["bms_voltage_v"]
         else:
