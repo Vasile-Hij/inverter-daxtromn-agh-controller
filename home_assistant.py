@@ -62,6 +62,7 @@ TEXT_SENSORS = [
     ("bms_alarms", "BMS Alarms", f"{settings.BASE_TOPIC}/can_battery/bms_alarms"),
     ("bms_warnings", "BMS Warnings", f"{settings.BASE_TOPIC}/can_battery/bms_warnings"),
     ("bms_manufacturer", "BMS Manufacturer", f"{settings.BASE_TOPIC}/can_battery/bms_manufacturer"),
+    ("charger_source_effective", "Charger Source Effective", f"{settings.BASE_TOPIC}/charger_source/effective"),
 ]
 
 # (object_id, name, state_topic, payload_on, payload_off, device_class or None)
@@ -71,6 +72,7 @@ BINARY_SENSORS = [
     ("npe_bonded", "N-PE Bonded", f"{settings.BASE_TOPIC}/npe_bonding/state", "ON", "OFF", None),
     ("battery_low", "Battery Low Voltage", f"{settings.BASE_TOPIC}/battery/low_voltage_status", "low", "ok", "problem"),
     ("output_priority_fault", "Output Priority Command Fault", f"{settings.BASE_TOPIC}/output_priority/command_fault", "ON", "OFF", "problem"),
+    ("utility_cap_active", "Utility Charging Cap Active", f"{settings.BASE_TOPIC}/charger_source/utility_cap_active", "ON", "OFF", None),
 ]
 
 # (object_id, name, state_topic, command_topic, options)
@@ -84,6 +86,7 @@ SELECTS = [
 NUMBERS = [
     ("discharge_stop_soc", "Battery Discharge Stop SOC", f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state", settings.DISCHARGE_STOP_SOC_TOPIC, 10, 50, 1, "%"),
     ("discharge_resume_soc", "Battery Discharge Resume SOC", f"{settings.BASE_TOPIC}/battery/discharge_resume_soc/state", settings.DISCHARGE_RESUME_SOC_TOPIC, 50, 100, 1, "%"),
+    ("utility_charging_max_soc", "Utility Charging Max SOC", f"{settings.BASE_TOPIC}/charger_source/utility_max_soc/state", settings.UTILITY_CHARGING_MAX_SOC_TOPIC, 20, 100, 1, "%"),
 ]
 
 
