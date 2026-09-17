@@ -1,19 +1,17 @@
 OUTPUT_PRIORITY_MODES = ("force_sbu", "force_sub")
 OUTPUT_PRIORITY_DEFAULT = "force_sbu"
 
+INVERTER_CAPACITY_STOP_MARGIN_PCT = 10
+
 
 class BatteryDischargeGuard:
     """Switches output priority between SBU and SUB based on SOC thresholds.
 
-    In force_sbu mode, auto-protection kicks in: when SOC drops to
-    stop_soc_pct (min), switches to force_sub.  When SOC recovers to
-    resume_soc_pct (max), switches back to force_sbu.
-    A manual mode change from HA clears the auto-protection flag.
-
-    The inverter's own battery_capacity_pct is checked alongside the
-    estimated SOC — if either is at or below the stop threshold, protection
-    triggers.  This prevents command faults when the inverter hardware
-    rejects SBU due to its own low-battery judgment.
+    When BMS is available, trusts BMS SOC against stop_soc_pct.
+    When BMS is offline but the inverter still detects a battery, falls back
+    to inverter battery_capacity_pct with an extra safety margin since the
+    inverter gauge is less accurate for LiFePO4.
+    When BMS is offline and the inverter detects no battery, forces SUB.
     """
 
     def __init__(self, stop_soc_pct, resume_soc_pct):
@@ -22,14 +20,25 @@ class BatteryDischargeGuard:
         self.mode = OUTPUT_PRIORITY_DEFAULT
         self._auto_protection_active = False
 
-    def update_auto_protection(self, estimated_soc_pct, battery_present, inverter_capacity_pct=None):
+    def update_auto_protection(self, estimated_soc_pct, battery_present,
+                               inverter_capacity_pct=None, bms_available=False):
         """Auto-switch mode based on SOC thresholds. Returns new mode if changed, else None."""
+        if not battery_present and not bms_available:
+            if self.mode != "force_sub":
+                self.mode = "force_sub"
+                self._auto_protection_active = True
+                return "force_sub"
+            return None
+
         if not battery_present:
             return None
 
-        soc_is_low = estimated_soc_pct <= self.stop_soc_pct
-        if inverter_capacity_pct is not None and inverter_capacity_pct <= self.stop_soc_pct:
-            soc_is_low = True
+        if bms_available:
+            soc_is_low = estimated_soc_pct <= self.stop_soc_pct
+        else:
+            inverter_stop_threshold = self.stop_soc_pct + INVERTER_CAPACITY_STOP_MARGIN_PCT
+            soc_is_low = (inverter_capacity_pct is not None
+                          and inverter_capacity_pct <= inverter_stop_threshold)
 
         if soc_is_low and self.mode != "force_sub":
             self.mode = "force_sub"
