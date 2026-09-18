@@ -1,4 +1,4 @@
-from pi30 import is_number
+from inverter.pi30 import is_number
 
 ZMAI_TOPIC_PREFIX = "energy-smart-meter-zmai-90"
 ZMAI_POWER_TOPIC = f"{ZMAI_TOPIC_PREFIX}/power/get"
