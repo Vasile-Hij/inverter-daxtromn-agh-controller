@@ -18,10 +18,12 @@ from battery import estimate_soc_from_voltage
 from can_battery import CanBattery
 from discharge_guard import BatteryDischargeGuard, OUTPUT_PRIORITY_MODES
 from home_assistant import HomeAssistantDiscovery
-from inverter import DaxtromnInverter, COMMAND_MAX_RETRIES
+from inverter import DaxtromnInverter, BATTERY_CURRENT_NOISE_A, COMMAND_MAX_RETRIES
 from npe_bonding import NpeBonding
 from pi30 import is_number
 from zmai_meter import ZmaiMeter, ZMAI_TOPIC_PREFIX
+
+BMS_OFFLINE_NO_SOLAR_TIMEOUT_SECONDS = 3 * 3600
 
 
 def notify_systemd(message):
@@ -61,6 +63,9 @@ class SolarMonitor:
         self._initialize_state()
 
     def _initialize_state(self):
+        self._bms_was_online = None
+        self._bms_offline_no_solar_since = None
+        self._bms_offline_fallback_active = False
         self.last_applied_priority = None
         self.output_priority_fault = False
         self.last_applied_charger_source = None
@@ -218,8 +223,9 @@ class SolarMonitor:
         self._publish_link_status(zmai_online, now)
         self._publish_can_battery(now)
         can_data = self.can_battery.get_data() if self.can_battery.has_recent_data(now) else None
-        battery_present, estimated_soc, battery_is_low = self._assess_battery(inverter_data, can_data, now)
-        self._apply_output_priority(estimated_soc, battery_present)
+        battery_present, estimated_soc, battery_is_low, bms_available = self._assess_battery(inverter_data, can_data, now)
+        self._check_bms_offline_fallback(inverter_data, bms_available, battery_present, now)
+        self._apply_output_priority(estimated_soc, battery_present, bms_available)
         self._apply_charger_source(estimated_soc)
         ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
         self._apply_npe_bonding(ac_input_voltage_v, grid_power_for_npe, zmai_online, battery_power_w, battery_is_low, now)
@@ -318,11 +324,13 @@ class SolarMonitor:
     def _assess_battery(self, inverter_data, can_data, now):
         battery_present = self.inverter.is_battery_present(inverter_data)
         self.client.publish(f"{settings.BASE_TOPIC}/derived/battery_present", "ON" if battery_present else "OFF")
+        bms_available = can_data is not None and "bms_soc_pct" in can_data
+        self._publish_bms_status_change(bms_available)
         inverter_voltage = inverter_data.get("battery_voltage_v", 0) if inverter_data is not None else 0
         inverter_soc = 0
         if battery_present and inverter_voltage > 0:
             inverter_soc = estimate_soc_from_voltage(inverter_voltage)
-        if can_data is not None and "bms_soc_pct" in can_data:
+        if bms_available:
             estimated_soc = can_data["bms_soc_pct"]
         else:
             estimated_soc = inverter_soc
@@ -337,14 +345,48 @@ class SolarMonitor:
         self.client.publish(f"{settings.BASE_TOPIC}/battery/low_voltage_status", "low" if battery_is_low else "ok")
         self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state", self.discharge_guard.stop_soc_pct)
         self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_resume_soc/state", self.discharge_guard.resume_soc_pct)
-        return battery_present, estimated_soc, battery_is_low
+        return battery_present, estimated_soc, battery_is_low, bms_available
 
-    def _apply_output_priority(self, estimated_soc, battery_present):
+    def _publish_bms_status_change(self, bms_available):
+        bms_status = "online" if bms_available else "offline"
+        self.client.publish(f"{settings.BASE_TOPIC}/can_battery/bms_soc_status", bms_status)
+        if self._bms_was_online is not None and bms_available != self._bms_was_online:
+            if bms_available:
+                print("BMS SOC data restored, trusting BMS for discharge protection", flush=True)
+            else:
+                print("WARNING: BMS SOC data lost, falling back to inverter capacity with safety margin", flush=True)
+        self._bms_was_online = bms_available
+
+    def _check_bms_offline_fallback(self, inverter_data, bms_available, battery_present, now):
+        """After 3h with BMS offline and no solar charging, force SUB and grid charging."""
+        if bms_available or not battery_present or inverter_data is None:
+            if self._bms_offline_fallback_active:
+                self._bms_offline_fallback_active = False
+                print("BMS offline fallback cleared", flush=True)
+            self._bms_offline_no_solar_since = None
+            return
+
+        charging_current = inverter_data.get("battery_charging_current_a", 0)
+        if charging_current > BATTERY_CURRENT_NOISE_A:
+            self._bms_offline_no_solar_since = None
+            return
+
+        if self._bms_offline_no_solar_since is None:
+            self._bms_offline_no_solar_since = now
+
+        elapsed = now - self._bms_offline_no_solar_since
+        if elapsed >= BMS_OFFLINE_NO_SOLAR_TIMEOUT_SECONDS and not self._bms_offline_fallback_active:
+            self._bms_offline_fallback_active = True
+            self.discharge_guard.accept_inverter_protection()
+            print(f"WARNING: BMS offline and no solar charging for {int(elapsed / 3600)}h, "
+                  "forcing SUB and solar_and_utility charging", flush=True)
+
+    def _apply_output_priority(self, estimated_soc, battery_present, bms_available):
         inverter_capacity_pct = None
         if self.inverter.last_data is not None:
             inverter_capacity_pct = self.inverter.last_data.get("battery_capacity_pct")
         auto_mode = self.discharge_guard.update_auto_protection(
-            estimated_soc, battery_present, inverter_capacity_pct,
+            estimated_soc, battery_present, inverter_capacity_pct, bms_available,
         )
         if auto_mode is not None:
             self.client.publish(f"{settings.BASE_TOPIC}/output_priority/mode/state", auto_mode)
@@ -375,7 +417,9 @@ class SolarMonitor:
         effective_charger_source = self.pending_charger_source
         self.utility_charging_capped = False
 
-        if (effective_charger_source is not None
+        if self._bms_offline_fallback_active:
+            effective_charger_source = "solar_and_utility"
+        elif (effective_charger_source is not None
                 and effective_charger_source != "solar_only"
                 and self.last_applied_priority == "SUB"
                 and estimated_soc >= self.utility_charging_max_soc_pct):
@@ -394,6 +438,7 @@ class SolarMonitor:
         self.client.publish(f"{settings.BASE_TOPIC}/charger_source/state", self.pending_charger_source or "unknown")
         self.client.publish(f"{settings.BASE_TOPIC}/charger_source/effective", self.last_applied_charger_source or "unknown")
         self.client.publish(f"{settings.BASE_TOPIC}/charger_source/utility_cap_active", "ON" if self.utility_charging_capped else "OFF")
+        self.client.publish(f"{settings.BASE_TOPIC}/charger_source/bms_offline_fallback", "ON" if self._bms_offline_fallback_active else "OFF")
         self.client.publish(f"{settings.BASE_TOPIC}/charger_source/utility_max_soc/state", self.utility_charging_max_soc_pct)
 
     def _apply_npe_bonding(self, ac_input_voltage_v, grid_power_w, zmai_online, battery_power_w, battery_is_low, now):
