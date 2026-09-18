@@ -2,8 +2,8 @@
 
 import time
 
-from pi30 import PI30Connection, is_number
-from npe_bonding import GRID_VOLTAGE_THRESHOLD_V
+from inverter.pi30 import PI30Connection, is_number
+from mqtt.npe_bonding import GRID_VOLTAGE_THRESHOLD_V
 
 COMMAND_MAX_RETRIES = 3
 COMMAND_RETRY_DELAY_SECONDS = 1

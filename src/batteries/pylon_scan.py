@@ -1,6 +1,6 @@
 """Scan for a Pylon-compatible battery across baud rates and addresses."""
 
-from pylon import PylonConnection
+from batteries.pylon import PylonConnection
 
 PYLON_PORT = "/dev/serial/by-id/usb-1a86_USB_Serial-if00-port0"
 

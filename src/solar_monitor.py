@@ -14,14 +14,14 @@ import paho.mqtt.client as mqtt
 
 import settings
 from alarm import Alarm
-from battery import estimate_soc_from_voltage
-from can_battery import CanBattery
-from discharge_guard import BatteryDischargeGuard, OUTPUT_PRIORITY_MODES
-from home_assistant import HomeAssistantDiscovery
-from inverter import DaxtromnInverter, BATTERY_CURRENT_NOISE_A, COMMAND_MAX_RETRIES
-from npe_bonding import NpeBonding
-from pi30 import is_number
-from zmai_meter import ZmaiMeter, ZMAI_TOPIC_PREFIX
+from batteries.battery import estimate_soc_from_voltage
+from batteries.can_battery import CanBattery
+from inverter.discharge_guard import BatteryDischargeGuard, OUTPUT_PRIORITY_MODES
+from inverter.inverter import DaxtromnInverter, BATTERY_CURRENT_NOISE_A, COMMAND_MAX_RETRIES
+from inverter.pi30 import is_number
+from mqtt.home_assistant import HomeAssistantDiscovery
+from mqtt.npe_bonding import NpeBonding
+from mqtt.zmai_meter import ZmaiMeter, ZMAI_TOPIC_PREFIX
 
 BMS_OFFLINE_NO_SOLAR_TIMEOUT_SECONDS = 3 * 3600
 
@@ -91,7 +91,7 @@ class SolarMonitor:
 
     def _snapshot_source_mtimes(self):
         source_directory = os.path.dirname(os.path.abspath(__file__))
-        source_files = glob.glob(os.path.join(source_directory, "*.py"))
+        source_files = glob.glob(os.path.join(source_directory, "**", "*.py"), recursive=True)
         return {path: os.path.getmtime(path) for path in source_files}
 
     def _source_files_changed(self):
