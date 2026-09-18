@@ -63,6 +63,7 @@ TEXT_SENSORS = [
     ("bms_warnings", "BMS Warnings", f"{settings.BASE_TOPIC}/can_battery/bms_warnings"),
     ("bms_manufacturer", "BMS Manufacturer", f"{settings.BASE_TOPIC}/can_battery/bms_manufacturer"),
     ("charger_source_effective", "Charger Source Effective", f"{settings.BASE_TOPIC}/charger_source/effective"),
+    ("pi_throttle_flags", "RPi Throttle Flags", f"{settings.BASE_TOPIC}/pi/throttle_flags"),
 ]
 
 # (object_id, name, state_topic, payload_on, payload_off, device_class or None)
@@ -73,6 +74,7 @@ BINARY_SENSORS = [
     ("battery_low", "Battery Low Voltage", f"{settings.BASE_TOPIC}/battery/low_voltage_status", "low", "ok", "problem"),
     ("output_priority_fault", "Output Priority Command Fault", f"{settings.BASE_TOPIC}/output_priority/command_fault", "ON", "OFF", "problem"),
     ("utility_cap_active", "Utility Charging Cap Active", f"{settings.BASE_TOPIC}/charger_source/utility_cap_active", "ON", "OFF", None),
+    ("pi_undervoltage", "RPi Undervoltage", f"{settings.BASE_TOPIC}/pi/undervoltage", "ON", "OFF", "problem"),
 ]
 
 # (object_id, name, state_topic, command_topic, options)
