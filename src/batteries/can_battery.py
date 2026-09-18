@@ -9,7 +9,7 @@ import struct
 import threading
 import time
 
-from dah_can_protocol import FRAME_DECODERS
+from batteries.dah_can_protocol import FRAME_DECODERS
 
 
 CAN_FRAME_FORMAT = "=IB3x8s"

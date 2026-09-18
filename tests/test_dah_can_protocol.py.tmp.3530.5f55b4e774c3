@@ -1,0 +1,116 @@
+import struct
+
+from batteries.dah_can_protocol import FRAME_DECODERS
+
+
+class TestDecodeSocSoh:
+
+    def test_decode_0x355(self):
+        fields = {}
+        data = struct.pack("<HH", 85, 99)
+        FRAME_DECODERS[0x355](data, fields)
+        assert fields["bms_soc_pct"] == 85
+        assert fields["bms_soh_pct"] == 99
+
+    def test_short_payload_ignored(self):
+        fields = {}
+        FRAME_DECODERS[0x355](b"\x00\x00", fields)
+        assert "bms_soc_pct" not in fields
+
+
+class TestDecodeVoltageCurrentTemp:
+
+    def test_decode_0x356(self):
+        fields = {}
+        voltage_raw = 5240
+        current_raw = -15
+        temp_raw = 250
+        data = struct.pack("<hhh", voltage_raw, current_raw, temp_raw)
+        FRAME_DECODERS[0x356](data, fields)
+        assert fields["bms_voltage_v"] == 52.40
+        assert fields["bms_current_a"] == -1.5
+        assert fields["bms_temperature_c"] == 25.0
+
+
+class TestDecodeChargeDischargeLimits:
+
+    def test_decode_0x351(self):
+        fields = {}
+        data = struct.pack("<HhhH", 576, 250, 250, 440)
+        FRAME_DECODERS[0x351](data, fields)
+        assert fields["bms_charge_voltage_limit_v"] == 57.6
+        assert fields["bms_charge_current_limit_a"] == 25.0
+        assert fields["bms_discharge_current_limit_a"] == 25.0
+        assert fields["bms_discharge_voltage_limit_v"] == 44.0
+
+
+class TestDecodeCellMinMax:
+
+    def test_decode_0x373(self):
+        fields = {}
+        data = struct.pack("<HHHH", 3300, 3350, 240, 260)
+        FRAME_DECODERS[0x373](data, fields)
+        assert fields["bms_cell_min_mv"] == 3300
+        assert fields["bms_cell_max_mv"] == 3350
+        assert fields["bms_cell_diff_mv"] == 50
+        assert fields["bms_temp_min_c"] == 24.0
+        assert fields["bms_temp_max_c"] == 26.0
+
+
+class TestDecodeAlarms:
+
+    def test_no_alarms(self):
+        fields = {}
+        data = bytes([0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00])
+        FRAME_DECODERS[0x359](data, fields)
+        assert fields["bms_alarms"] == "none"
+        assert fields["bms_warnings"] == "none"
+        assert fields["bms_module_count"] == 1
+
+    def test_cell_high_voltage_alarm(self):
+        fields = {}
+        data = bytes([0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00])
+        FRAME_DECODERS[0x359](data, fields)
+        assert "cell_high_voltage" in fields["bms_alarms"]
+
+    def test_multiple_alarms(self):
+        fields = {}
+        data = bytes([0x0C, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00])
+        FRAME_DECODERS[0x359](data, fields)
+        assert "cell_low_voltage" in fields["bms_alarms"]
+        assert "high_temperature" in fields["bms_alarms"]
+
+
+class TestDecodeChargeRequest:
+
+    def test_charge_and_discharge_enabled(self):
+        fields = {}
+        data = struct.pack("<H", 0xC0)
+        FRAME_DECODERS[0x35C](data, fields)
+        assert fields["bms_charge_enable"] is True
+        assert fields["bms_discharge_enable"] is True
+        assert fields["bms_force_charge_request"] is False
+
+    def test_force_charge(self):
+        fields = {}
+        data = struct.pack("<H", 0xE0)
+        FRAME_DECODERS[0x35C](data, fields)
+        assert fields["bms_force_charge_request"] is True
+
+
+class TestDecodeCapacity:
+
+    def test_decode_0x379(self):
+        fields = {}
+        data = struct.pack("<H", 280)
+        FRAME_DECODERS[0x379](data, fields)
+        assert fields["bms_capacity_ah"] == 280
+
+
+class TestDecodeManufacturer:
+
+    def test_decode_0x35E(self):
+        fields = {}
+        data = b"DAH\x00\x00\x00\x00\x00"
+        FRAME_DECODERS[0x35E](data, fields)
+        assert fields["bms_manufacturer"] == "DAH"
