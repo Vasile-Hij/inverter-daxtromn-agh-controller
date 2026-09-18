@@ -3,7 +3,7 @@
 import json
 
 import settings
-from discharge_guard import OUTPUT_PRIORITY_MODES
+from inverter.discharge_guard import OUTPUT_PRIORITY_MODES
 
 DEVICE_INFO = {"identifiers": [settings.DEVICE_ID], "name": "rasp", "manufacturer": "Daxtromn/ZMAi-90"}
 AVAILABILITY = [
