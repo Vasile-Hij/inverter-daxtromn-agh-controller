@@ -7,7 +7,7 @@ Control Daxtromn 10.2kW AGH inverter with 2 MPPT and DAH battery.
    `pv2 = (ac_output - grid_power) / efficiency - battery_net - pv1`
    (efficiency default 0.93, configurable via MQTT; falls back to PV2/PV1 ratio when grid data unavailable)
 
-2. **N-PE voltage leak** — 20–90V leak on neutral when inverter is islanding; low-powered LEDs blink in darkness. Solution: SSR relay (25A) bonds N to PE only when inverter is confirmed off-grid via ZMAi-90 power readings, with a stability delay. Forbidden when grid is connected (TN-C-S).
+2. **N-PE voltage leak** — Missing physical N-PE bonding causes 20–90V leak on neutral when inverter is islanding; low-powered LEDs blink in darkness. Solution: SSR relay (25A) bonds N to PE only when inverter is islanding (running from PV, battery, or both without grid). In TN-C-S systems, when the inverter is connected to the grid and loads are consuming from utility or the battery is charging from grid, N-PE bonding must be off. Bonding is only activated when the inverter is confirmed off-grid via ZMAi-90 power readings, with a stability delay.
 
 3. **SBU deep discharge** — In SBU mode with solar-only charging (setting 02 + setting 16 at 050), consecutive cloudy days can drain the battery near 0% requiring manual restart. Discharge Guard handles this automatically (see below).
 

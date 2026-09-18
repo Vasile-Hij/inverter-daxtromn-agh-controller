@@ -22,6 +22,7 @@ from inverter.pi30 import is_number
 from mqtt.home_assistant import HomeAssistantDiscovery
 from mqtt.npe_bonding import NpeBonding
 from mqtt.zmai_meter import ZmaiMeter, ZMAI_TOPIC_PREFIX
+from pi_throttle import read_throttled_hex, decode_active_flags
 
 BMS_OFFLINE_NO_SOLAR_TIMEOUT_SECONDS = 3 * 3600
 
@@ -58,6 +59,7 @@ class SolarMonitor:
             settings.BATTERY_DISCHARGE_STOP_SOC_PCT,
             settings.BATTERY_RESUME_SOC_PCT,
         )
+        self.undervoltage_alarm = Alarm("pi-undervoltage", settings.ALARM_REPEAT_SECONDS)
         self.client = mqtt.Client()
         self.discovery = HomeAssistantDiscovery(self.client)
         self._initialize_state()
@@ -229,6 +231,7 @@ class SolarMonitor:
         self._apply_charger_source(estimated_soc)
         ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
         self._apply_npe_bonding(ac_input_voltage_v, grid_power_for_npe, zmai_online, battery_power_w, battery_is_low, now)
+        self._check_pi_throttle(now)
 
     def _publish_grid_readings(self, now):
         if self.zmai_meter.power_w is not None:
@@ -450,6 +453,20 @@ class SolarMonitor:
         for reason_key, reason_value in self.npe_bonding.last_reasons.items():
             self.client.publish(f"{settings.BASE_TOPIC}/npe_bonding/debug/{reason_key}", reason_value)
         self.client.publish(f"{settings.BASE_TOPIC}/npe_bonding/mode/state", self.npe_bonding.mode)
+
+    def _check_pi_throttle(self, now):
+        throttled_hex = read_throttled_hex()
+        if throttled_hex is None:
+            return
+        undervoltage_active = bool(throttled_hex & 0x1)
+        active_flags = decode_active_flags(throttled_hex)
+        self.undervoltage_alarm.update(undervoltage_active, f"flags: {', '.join(active_flags) or 'none'}", now)
+        self.client.publish(f"{settings.BASE_TOPIC}/pi/undervoltage", "ON" if undervoltage_active else "OFF")
+        self.client.publish(f"{settings.BASE_TOPIC}/pi/throttled_raw", hex(throttled_hex))
+        if active_flags:
+            self.client.publish(f"{settings.BASE_TOPIC}/pi/throttle_flags", ", ".join(active_flags))
+        else:
+            self.client.publish(f"{settings.BASE_TOPIC}/pi/throttle_flags", "none")
 
     @staticmethod
     def _sleep_until_next_cycle(cycle_start):
