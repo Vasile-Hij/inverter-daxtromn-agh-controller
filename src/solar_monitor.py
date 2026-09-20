@@ -8,6 +8,7 @@ POLL_INTERVAL_SECONDS.
 import glob
 import os
 import socket
+import sys
 import time
 
 import paho.mqtt.client as mqtt
@@ -48,7 +49,6 @@ class SolarMonitor:
             settings.NPE_RELAY_PIN,
             settings.NPE_BOND_THRESHOLD_W,
             settings.NPE_BOND_STABLE_SECONDS,
-            settings.NPE_BATTERY_STALE_SECONDS,
         )
         self.inverter = DaxtromnInverter(settings.INVERTER_PORT, settings.INVERTER_BAUD, settings.INVERTER_STALE_SECONDS)
         self.can_battery = CanBattery(settings.CAN_INTERFACE, settings.CAN_BATTERY_STALE_SECONDS)
@@ -209,7 +209,7 @@ class SolarMonitor:
             self._run_cycle(cycle_start)
             if self._source_files_changed():
                 print("source files changed, restarting", flush=True)
-                return
+                os.execv(sys.executable, [sys.executable] + sys.argv)
             self._sleep_until_next_cycle(cycle_start)
 
     def _run_cycle(self, now):
@@ -230,7 +230,8 @@ class SolarMonitor:
         self._apply_output_priority(estimated_soc, battery_present, bms_available)
         self._apply_charger_source(estimated_soc)
         ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
-        self._apply_npe_bonding(ac_input_voltage_v, grid_power_for_npe, zmai_online, battery_power_w, battery_is_low, now)
+        inverter_online = self.inverter.has_recent_data(now)
+        self._apply_npe_bonding(ac_input_voltage_v, grid_power_for_npe, zmai_online, inverter_online, now)
         self._check_pi_throttle(now)
 
     def _publish_grid_readings(self, now):
@@ -444,10 +445,8 @@ class SolarMonitor:
         self.client.publish(f"{settings.BASE_TOPIC}/charger_source/bms_offline_fallback", "ON" if self._bms_offline_fallback_active else "OFF")
         self.client.publish(f"{settings.BASE_TOPIC}/charger_source/utility_max_soc/state", self.utility_charging_max_soc_pct)
 
-    def _apply_npe_bonding(self, ac_input_voltage_v, grid_power_w, zmai_online, battery_power_w, battery_is_low, now):
-        desired_bond_state = self.npe_bonding.decide(ac_input_voltage_v, grid_power_w, zmai_online, battery_power_w, now)
-        if battery_is_low:
-            desired_bond_state = False
+    def _apply_npe_bonding(self, ac_input_voltage_v, grid_power_w, zmai_online, inverter_online, now):
+        desired_bond_state = self.npe_bonding.decide(ac_input_voltage_v, grid_power_w, zmai_online, inverter_online, now)
         self.npe_bonding.apply(desired_bond_state)
         self.client.publish(f"{settings.BASE_TOPIC}/npe_bonding/state", "ON" if self.npe_bonding.is_bonded else "OFF")
         for reason_key, reason_value in self.npe_bonding.last_reasons.items():
