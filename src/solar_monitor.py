@@ -8,6 +8,7 @@ POLL_INTERVAL_SECONDS.
 import glob
 import os
 import socket
+import sys
 import time
 
 import paho.mqtt.client as mqtt
@@ -22,6 +23,7 @@ from inverter.pi30 import is_number
 from mqtt.home_assistant import HomeAssistantDiscovery
 from mqtt.npe_bonding import NpeBonding
 from mqtt.zmai_meter import ZmaiMeter, ZMAI_TOPIC_PREFIX
+from pi_throttle import read_throttled_hex, decode_active_flags
 
 BMS_OFFLINE_NO_SOLAR_TIMEOUT_SECONDS = 3 * 3600
 
@@ -47,7 +49,6 @@ class SolarMonitor:
             settings.NPE_RELAY_PIN,
             settings.NPE_BOND_THRESHOLD_W,
             settings.NPE_BOND_STABLE_SECONDS,
-            settings.NPE_BATTERY_STALE_SECONDS,
         )
         self.inverter = DaxtromnInverter(settings.INVERTER_PORT, settings.INVERTER_BAUD, settings.INVERTER_STALE_SECONDS)
         self.can_battery = CanBattery(settings.CAN_INTERFACE, settings.CAN_BATTERY_STALE_SECONDS)
@@ -58,6 +59,7 @@ class SolarMonitor:
             settings.BATTERY_DISCHARGE_STOP_SOC_PCT,
             settings.BATTERY_RESUME_SOC_PCT,
         )
+        self.undervoltage_alarm = Alarm("pi-undervoltage", settings.ALARM_REPEAT_SECONDS)
         self.client = mqtt.Client()
         self.discovery = HomeAssistantDiscovery(self.client)
         self._initialize_state()
@@ -207,7 +209,7 @@ class SolarMonitor:
             self._run_cycle(cycle_start)
             if self._source_files_changed():
                 print("source files changed, restarting", flush=True)
-                return
+                os.execv(sys.executable, [sys.executable] + sys.argv)
             self._sleep_until_next_cycle(cycle_start)
 
     def _run_cycle(self, now):
@@ -228,7 +230,9 @@ class SolarMonitor:
         self._apply_output_priority(estimated_soc, battery_present, bms_available)
         self._apply_charger_source(estimated_soc)
         ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
-        self._apply_npe_bonding(ac_input_voltage_v, grid_power_for_npe, zmai_online, battery_power_w, battery_is_low, now)
+        inverter_online = self.inverter.has_recent_data(now)
+        self._apply_npe_bonding(ac_input_voltage_v, grid_power_for_npe, zmai_online, inverter_online, now)
+        self._check_pi_throttle(now)
 
     def _publish_grid_readings(self, now):
         if self.zmai_meter.power_w is not None:
@@ -441,15 +445,27 @@ class SolarMonitor:
         self.client.publish(f"{settings.BASE_TOPIC}/charger_source/bms_offline_fallback", "ON" if self._bms_offline_fallback_active else "OFF")
         self.client.publish(f"{settings.BASE_TOPIC}/charger_source/utility_max_soc/state", self.utility_charging_max_soc_pct)
 
-    def _apply_npe_bonding(self, ac_input_voltage_v, grid_power_w, zmai_online, battery_power_w, battery_is_low, now):
-        desired_bond_state = self.npe_bonding.decide(ac_input_voltage_v, grid_power_w, zmai_online, battery_power_w, now)
-        if battery_is_low:
-            desired_bond_state = False
+    def _apply_npe_bonding(self, ac_input_voltage_v, grid_power_w, zmai_online, inverter_online, now):
+        desired_bond_state = self.npe_bonding.decide(ac_input_voltage_v, grid_power_w, zmai_online, inverter_online, now)
         self.npe_bonding.apply(desired_bond_state)
         self.client.publish(f"{settings.BASE_TOPIC}/npe_bonding/state", "ON" if self.npe_bonding.is_bonded else "OFF")
         for reason_key, reason_value in self.npe_bonding.last_reasons.items():
             self.client.publish(f"{settings.BASE_TOPIC}/npe_bonding/debug/{reason_key}", reason_value)
         self.client.publish(f"{settings.BASE_TOPIC}/npe_bonding/mode/state", self.npe_bonding.mode)
+
+    def _check_pi_throttle(self, now):
+        throttled_hex = read_throttled_hex()
+        if throttled_hex is None:
+            return
+        undervoltage_active = bool(throttled_hex & 0x1)
+        active_flags = decode_active_flags(throttled_hex)
+        self.undervoltage_alarm.update(undervoltage_active, f"flags: {', '.join(active_flags) or 'none'}", now)
+        self.client.publish(f"{settings.BASE_TOPIC}/pi/undervoltage", "ON" if undervoltage_active else "OFF")
+        self.client.publish(f"{settings.BASE_TOPIC}/pi/throttled_raw", hex(throttled_hex))
+        if active_flags:
+            self.client.publish(f"{settings.BASE_TOPIC}/pi/throttle_flags", ", ".join(active_flags))
+        else:
+            self.client.publish(f"{settings.BASE_TOPIC}/pi/throttle_flags", "none")
 
     @staticmethod
     def _sleep_until_next_cycle(cycle_start):
