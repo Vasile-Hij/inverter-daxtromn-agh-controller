@@ -25,7 +25,6 @@ ALARM_REPEAT_SECONDS = 300
 BATTERY_LOW_VOLTAGE_V = 44.0
 BATTERY_DISCHARGE_STOP_SOC_PCT = 10
 BATTERY_RESUME_SOC_PCT = 50
-UTILITY_CHARGING_MAX_SOC_PCT = 51
 
 POLL_INTERVAL_SECONDS = 5
 
@@ -45,16 +44,13 @@ NPE_MODES = ("auto", "manual_on", "manual_off")
 PV_EFFICIENCY_TOPIC = f"{BASE_TOPIC}/pv/efficiency/set"
 PV2_RATIO_TOPIC = f"{BASE_TOPIC}/pv/pv2_ratio/set"
 PV_EFFICIENCY_DEFAULT = 0.93
-OUTPUT_PRIORITY_MODE_TOPIC = f"{BASE_TOPIC}/output_priority/mode/set"
-CHARGER_SOURCE_TOPIC = f"{BASE_TOPIC}/charger_source/set"
+BATTERY_MODE_TOPIC = f"{BASE_TOPIC}/battery_mode/set"
 DISCHARGE_STOP_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_stop_soc/set"
 DISCHARGE_RESUME_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_resume_soc/set"
-UTILITY_CHARGING_MAX_SOC_TOPIC = f"{BASE_TOPIC}/charger_source/utility_max_soc/set"
 
 CAN_INTERFACE = "can0"
 CAN_BATTERY_STALE_SECONDS = 30
 
-CHARGER_SOURCE_OPTIONS = ("solar_first", "utility_first", "solar_and_utility", "solar_only")
 CHARGER_SOURCE_TO_PCP = {
     "utility_first": "PCP00",
     "solar_first": "PCP01",
