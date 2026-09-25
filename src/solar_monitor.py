@@ -83,6 +83,7 @@ class SolarMonitor:
             settings.PV2_RATIO_TOPIC: self._handle_pv2_ratio,
             settings.DISCHARGE_STOP_SOC_TOPIC: self._handle_discharge_stop_soc,
             settings.DISCHARGE_RESUME_SOC_TOPIC: self._handle_discharge_resume_soc,
+            settings.QUICK_CHARGE_SWITCH_SOC_TOPIC: self._handle_quick_charge_switch_soc,
         }
         self._source_mtimes = self._snapshot_source_mtimes()
 
@@ -156,6 +157,14 @@ class SolarMonitor:
         if 50 <= value <= 100:
             self.battery_mode.resume_soc_pct = value
             print(f"discharge resume SOC set to {value}%", flush=True)
+
+    def _handle_quick_charge_switch_soc(self, payload):
+        if not is_number(payload):
+            return
+        value = int(float(payload))
+        if 20 <= value <= 100:
+            self.battery_mode.quick_charge_switch_soc_pct = value
+            print(f"quick charge switch SOC set to {value}%", flush=True)
 
     def _connect_mqtt(self):
         self.client.username_pw_set(settings.MQTT_USER, settings.MQTT_PASSWORD)
@@ -423,6 +432,8 @@ class SolarMonitor:
                             "ON" if self._bms_offline_fallback_active else "OFF")
         self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state", self.battery_mode.stop_soc_pct)
         self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_resume_soc/state", self.battery_mode.resume_soc_pct)
+        self.client.publish(f"{settings.BASE_TOPIC}/battery_mode/quick_charge_switch_soc/state",
+                            self.battery_mode.quick_charge_switch_soc_pct)
 
     def _apply_npe_bonding(self, ac_input_voltage_v, grid_power_w, zmai_online, inverter_online, now):
         desired_bond_state = self.npe_bonding.decide(ac_input_voltage_v, grid_power_w, zmai_online, inverter_online, now)

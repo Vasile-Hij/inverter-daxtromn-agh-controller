@@ -26,7 +26,7 @@ LOW_BATTERY_OVERRIDE = {"output_priority": "SUB", "charger_source": "solar_only"
 OUTPUT_PRIORITY_TO_POP = {"USB": "POP00", "SUB": "POP01", "SBU": "POP02"}
 
 INVERTER_CAPACITY_STOP_MARGIN_PCT = 10
-QUICK_CHARGE_AUTO_SWITCH_SOC_PCT = 51
+QUICK_CHARGE_SWITCH_SOC_DEFAULT_PCT = 51
 PV_PRODUCING_THRESHOLD_W = 10
 
 
@@ -37,6 +37,7 @@ class BatteryMode:
         self.selected_mode = BATTERY_MODE_DEFAULT
         self.stop_soc_pct = stop_soc_pct
         self.resume_soc_pct = resume_soc_pct
+        self.quick_charge_switch_soc_pct = QUICK_CHARGE_SWITCH_SOC_DEFAULT_PCT
         self._low_battery_active = False
 
     @property
@@ -89,7 +90,7 @@ class BatteryMode:
         if self._should_auto_switch_from_quick_charge(estimated_soc_pct, pv_power_w):
             self.selected_mode = "battery_savings"
             return (f"quick charge complete ({estimated_soc_pct}% > "
-                    f"{QUICK_CHARGE_AUTO_SWITCH_SOC_PCT}% with PV), "
+                    f"{self.quick_charge_switch_soc_pct}% with PV), "
                     "switching to battery_savings")
 
         return None
@@ -106,7 +107,7 @@ class BatteryMode:
             return False
         if self._low_battery_active:
             return False
-        if estimated_soc_pct <= QUICK_CHARGE_AUTO_SWITCH_SOC_PCT:
+        if estimated_soc_pct <= self.quick_charge_switch_soc_pct:
             return False
         return pv_power_w is not None and pv_power_w > PV_PRODUCING_THRESHOLD_W
 

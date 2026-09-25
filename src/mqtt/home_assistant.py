@@ -88,6 +88,7 @@ SELECTS = [
 NUMBERS = [
     ("discharge_stop_soc", "Battery Discharge Stop SOC", f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state", settings.DISCHARGE_STOP_SOC_TOPIC, 10, 50, 1, "%"),
     ("discharge_resume_soc", "Battery Discharge Resume SOC", f"{settings.BASE_TOPIC}/battery/discharge_resume_soc/state", settings.DISCHARGE_RESUME_SOC_TOPIC, 50, 100, 1, "%"),
+    ("quick_charge_switch_soc", "Quick Charge Switch SOC", f"{settings.BASE_TOPIC}/battery_mode/quick_charge_switch_soc/state", settings.QUICK_CHARGE_SWITCH_SOC_TOPIC, 20, 100, 1, "%"),
 ]
 
 

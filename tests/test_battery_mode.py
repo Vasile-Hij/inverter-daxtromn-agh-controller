@@ -176,3 +176,26 @@ class TestQuickChargeAutoSwitch:
         result = mode.update(51, battery_present=True, pv_power_w=100, bms_available=True)
         assert result is None
         assert mode.selected_mode == "battery_quick_charge"
+
+    def test_manual_override_switch_soc_threshold(self):
+        mode = BatteryMode(stop_soc_pct=10, resume_soc_pct=50)
+        mode.select("battery_quick_charge")
+        mode.quick_charge_switch_soc_pct = 80
+        result = mode.update(55, battery_present=True, pv_power_w=100, bms_available=True)
+        assert result is None
+        assert mode.selected_mode == "battery_quick_charge"
+        result = mode.update(85, battery_present=True, pv_power_w=100, bms_available=True)
+        assert result is not None
+        assert mode.selected_mode == "battery_savings"
+
+    def test_manual_override_stop_soc_persists_through_mode_change(self):
+        mode = BatteryMode(stop_soc_pct=10, resume_soc_pct=50)
+        mode.stop_soc_pct = 25
+        mode.select("battery_charge_slow")
+        assert mode.stop_soc_pct == 25
+
+    def test_manual_override_resume_soc_persists_through_mode_change(self):
+        mode = BatteryMode(stop_soc_pct=10, resume_soc_pct=50)
+        mode.resume_soc_pct = 70
+        mode.select("battery_quick_charge")
+        assert mode.resume_soc_pct == 70

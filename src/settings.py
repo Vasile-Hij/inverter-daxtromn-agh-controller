@@ -47,6 +47,7 @@ PV_EFFICIENCY_DEFAULT = 0.93
 BATTERY_MODE_TOPIC = f"{BASE_TOPIC}/battery_mode/set"
 DISCHARGE_STOP_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_stop_soc/set"
 DISCHARGE_RESUME_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_resume_soc/set"
+QUICK_CHARGE_SWITCH_SOC_TOPIC = f"{BASE_TOPIC}/battery_mode/quick_charge_switch_soc/set"
 
 CAN_INTERFACE = "can0"
 CAN_BATTERY_STALE_SECONDS = 30
