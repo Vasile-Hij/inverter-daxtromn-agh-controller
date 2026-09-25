@@ -3,7 +3,7 @@
 import json
 
 import settings
-from inverter.discharge_guard import OUTPUT_PRIORITY_MODES
+from inverter.battery_mode import BATTERY_MODES
 
 DEVICE_INFO = {"identifiers": [settings.DEVICE_ID], "name": "rasp", "manufacturer": "Daxtromn/ZMAi-90"}
 AVAILABILITY = [
@@ -63,6 +63,7 @@ TEXT_SENSORS = [
     ("bms_warnings", "BMS Warnings", f"{settings.BASE_TOPIC}/can_battery/bms_warnings"),
     ("bms_manufacturer", "BMS Manufacturer", f"{settings.BASE_TOPIC}/can_battery/bms_manufacturer"),
     ("charger_source_effective", "Charger Source Effective", f"{settings.BASE_TOPIC}/charger_source/effective"),
+    ("battery_mode_display", "Battery Mode Display", f"{settings.BASE_TOPIC}/battery_mode/display"),
     ("pi_throttle_flags", "RPi Throttle Flags", f"{settings.BASE_TOPIC}/pi/throttle_flags"),
 ]
 
@@ -73,22 +74,21 @@ BINARY_SENSORS = [
     ("npe_bonded", "N-PE Bonded", f"{settings.BASE_TOPIC}/npe_bonding/state", "ON", "OFF", None),
     ("battery_low", "Battery Low Voltage", f"{settings.BASE_TOPIC}/battery/low_voltage_status", "low", "ok", "problem"),
     ("output_priority_fault", "Output Priority Command Fault", f"{settings.BASE_TOPIC}/output_priority/command_fault", "ON", "OFF", "problem"),
-    ("utility_cap_active", "Utility Charging Cap Active", f"{settings.BASE_TOPIC}/charger_source/utility_cap_active", "ON", "OFF", None),
+    ("battery_low_battery_active", "Battery Low Protection Active", f"{settings.BASE_TOPIC}/battery_mode/low_battery_active", "ON", "OFF", None),
     ("pi_undervoltage", "RPi Undervoltage", f"{settings.BASE_TOPIC}/pi/undervoltage", "ON", "OFF", "problem"),
 ]
 
 # (object_id, name, state_topic, command_topic, options)
 SELECTS = [
     ("npe_mode", "N-PE Bonding Mode", f"{settings.BASE_TOPIC}/npe_bonding/mode/state", settings.NPE_MODE_TOPIC, settings.NPE_MODES),
-    ("output_priority_mode", "Output Priority Mode", f"{settings.BASE_TOPIC}/output_priority/mode/state", settings.OUTPUT_PRIORITY_MODE_TOPIC, OUTPUT_PRIORITY_MODES),
-    ("charger_source", "Charger Source", f"{settings.BASE_TOPIC}/charger_source/state", settings.CHARGER_SOURCE_TOPIC, settings.CHARGER_SOURCE_OPTIONS),
+    ("battery_mode", "Battery Mode", f"{settings.BASE_TOPIC}/battery_mode/state", settings.BATTERY_MODE_TOPIC, BATTERY_MODES),
 ]
 
 # (object_id, name, state_topic, command_topic, minimum, maximum, step, unit)
 NUMBERS = [
     ("discharge_stop_soc", "Battery Discharge Stop SOC", f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state", settings.DISCHARGE_STOP_SOC_TOPIC, 10, 50, 1, "%"),
     ("discharge_resume_soc", "Battery Discharge Resume SOC", f"{settings.BASE_TOPIC}/battery/discharge_resume_soc/state", settings.DISCHARGE_RESUME_SOC_TOPIC, 50, 100, 1, "%"),
-    ("utility_charging_max_soc", "Utility Charging Max SOC", f"{settings.BASE_TOPIC}/charger_source/utility_max_soc/state", settings.UTILITY_CHARGING_MAX_SOC_TOPIC, 20, 100, 1, "%"),
+    ("quick_charge_switch_soc", "Quick Charge Switch SOC", f"{settings.BASE_TOPIC}/battery_mode/quick_charge_switch_soc/state", settings.QUICK_CHARGE_SWITCH_SOC_TOPIC, 20, 100, 1, "%"),
 ]
 
 
