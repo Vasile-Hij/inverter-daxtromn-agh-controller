@@ -28,6 +28,7 @@ from pi_throttle import read_throttled_hex, decode_active_flags
 BMS_OFFLINE_NO_SOLAR_TIMEOUT_SECONDS = 3 * 3600
 MODE_VERIFY_INTERVAL_SECONDS = 600
 PREEMPTIVE_SOC_MARGIN_PCT = 3
+SBU_REJECT_COOLDOWN_SECONDS = 20
 
 
 def notify_systemd(message):
@@ -79,6 +80,7 @@ class SolarMonitor:
         self.last_applied_priority = None
         self.output_priority_fault = False
         self.last_applied_charger_source = None
+        self._sbu_reject_cooldown_until = 0
 
         self.pv_efficiency = settings.PV_EFFICIENCY_DEFAULT
         self.pv2_pv1_ratio = settings.PV2_PV1_RATIO_DEFAULT
@@ -138,6 +140,7 @@ class SolarMonitor:
     def _handle_battery_mode(self, payload):
         if not self.battery_mode.select(payload):
             return
+        self._sbu_reject_cooldown_until = 0
         self.client.publish(f"{settings.BASE_TOPIC}/battery_mode/state", self.battery_mode.selected_mode)
         self.client.publish(f"{settings.BASE_TOPIC}/battery_mode/display", self.battery_mode.status_description)
         print(f"battery mode set to {self.battery_mode.status_description}", flush=True)
@@ -467,6 +470,9 @@ class SolarMonitor:
         if not battery_present or self.battery_mode.selected_mode != "auto":
             return
 
+        if now < self._sbu_reject_cooldown_until:
+            return
+
         actual_priority = self.inverter.query_output_source_priority()
 
         if actual_priority is None:
@@ -516,11 +522,17 @@ class SolarMonitor:
         if desired_priority == self.last_applied_priority:
             return
 
+        now = time.time()
+        if desired_priority == "SBU" and now < self._sbu_reject_cooldown_until:
+            return
+
         pop_command = OUTPUT_PRIORITY_TO_POP[desired_priority]
 
         if self.inverter.set_output_priority(pop_command):
             self.last_applied_priority = desired_priority
             self.output_priority_fault = False
+            if desired_priority == "SBU":
+                self._sbu_reject_cooldown_until = 0
             print(f"output priority: {desired_priority} (SOC {estimated_soc}%)", flush=True)
             return
 
@@ -530,9 +542,10 @@ class SolarMonitor:
         if actual_priority is not None:
             self.last_applied_priority = actual_priority
         if desired_priority == "SBU" and self.last_applied_priority == "SUB":
+            self._sbu_reject_cooldown_until = now + SBU_REJECT_COOLDOWN_SECONDS
             self.battery_mode.accept_inverter_protection()
-            print(f"inverter rejected SBU, accepting SUB (SOC {estimated_soc}%, "
-                  f"inverter cap {inverter_capacity_pct}%)", flush=True)
+            print(f"inverter rejected SBU, accepting SUB, retry in {SBU_REJECT_COOLDOWN_SECONDS}s "
+                  f"(SOC {estimated_soc}%, inverter cap {inverter_capacity_pct}%)", flush=True)
         else:
             print(f"output priority command failed: wanted {desired_priority}", flush=True)
 
