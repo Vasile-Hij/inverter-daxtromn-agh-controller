@@ -1,4 +1,8 @@
-"""Battery charging mode: auto (Low Battery Protection + Grid Stop Charging) or manual (Grid Quick Charge)."""
+"""Battery charging mode: auto (Low Battery Protection + Grid Stop Charging) or manual (Grid Quick Charge).
+
+SBU is set on the LCD — POP02 is blocked by firmware for LIb batteries.
+Software only controls charger source (PCP commands) and SUB fallback (POP01) for no-battery.
+"""
 
 BATTERY_MODES = ("auto", "manual")
 BATTERY_MODE_DEFAULT = "auto"
@@ -11,18 +15,23 @@ STATE_SETTINGS = {
     },
     "auto_low_battery": {
         "description": "auto: low battery protection",
+        "output_priority": "SBU",
+        "charger_source": "solar_and_utility",
+    },
+    "auto_no_battery": {
+        "description": "auto: no battery",
         "output_priority": "SUB",
-        "charger_source": "solar_first",
+        "charger_source": "solar_and_utility",
     },
     "manual_grid_charging": {
         "description": "manual: grid quick charge",
-        "output_priority": "USB",
+        "output_priority": "SBU",
         "charger_source": "solar_and_utility",
     },
     "manual_charged": {
         "description": "manual: charged, holding",
-        "output_priority": "SUB",
-        "charger_source": "solar_first",
+        "output_priority": "SBU",
+        "charger_source": "solar_only",
     },
 }
 
@@ -40,6 +49,7 @@ class BatteryMode:
         self.grid_stop_charging_soc_pct = grid_stop_charging_soc_pct
         self.grid_quick_charge_soc_pct = grid_quick_charge_soc_pct
         self._low_battery_active = False
+        self._no_battery_active = False
         self._grid_quick_charge_complete = False
 
     @property
@@ -48,6 +58,8 @@ class BatteryMode:
             if self._grid_quick_charge_complete:
                 return "manual_charged"
             return "manual_grid_charging"
+        if self._no_battery_active:
+            return "auto_no_battery"
         if self._low_battery_active:
             return "auto_low_battery"
         return "auto_normal"
@@ -70,11 +82,16 @@ class BatteryMode:
     def is_low_battery_active(self):
         return self._low_battery_active
 
+    @property
+    def is_no_battery_active(self):
+        return self._no_battery_active
+
     def select(self, mode_name):
         if mode_name not in BATTERY_MODES:
             return False
         self.selected_mode = mode_name
         self._low_battery_active = False
+        self._no_battery_active = False
         self._grid_quick_charge_complete = False
         return True
 
@@ -93,10 +110,15 @@ class BatteryMode:
 
     def _update_auto(self, estimated_soc_pct, battery_present, inverter_capacity_pct, bms_available):
         if not battery_present and not bms_available:
-            if self._low_battery_active:
+            if self._no_battery_active:
                 return None
-            self._low_battery_active = True
+            self._no_battery_active = True
+            self._low_battery_active = False
             return f"no battery detected, now {self.status_description}"
+
+        if self._no_battery_active:
+            self._no_battery_active = False
+            return f"battery returned, now {self.status_description}"
 
         if not battery_present:
             return None

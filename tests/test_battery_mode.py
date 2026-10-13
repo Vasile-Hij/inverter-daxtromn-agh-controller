@@ -31,6 +31,13 @@ class TestModeSelection:
         mode.select("auto")
         assert mode.is_low_battery_active is False
 
+    def test_select_clears_no_battery(self):
+        mode = create_battery_mode()
+        mode.update(0, battery_present=False, bms_available=False)
+        assert mode.is_no_battery_active is True
+        mode.select("auto")
+        assert mode.is_no_battery_active is False
+
 
 class TestAutoMode:
 
@@ -40,13 +47,13 @@ class TestAutoMode:
         assert mode.desired_charger_source == "solar_only"
         assert mode.status_description == "auto: normal (SBU + solar_only)"
 
-    def test_low_battery_protection_switches_to_sub_solar_first(self):
+    def test_low_battery_protection_keeps_sbu_adds_grid_charging(self):
         mode = create_battery_mode()
         assert mode.update(10, battery_present=True, bms_available=True) is not None
         assert mode.state == "auto_low_battery"
-        assert mode.desired_output_priority == "SUB"
-        assert mode.desired_charger_source == "solar_first"
-        assert mode.status_description == "auto: low battery protection (SUB + solar_first)"
+        assert mode.desired_output_priority == "SBU"
+        assert mode.desired_charger_source == "solar_and_utility"
+        assert mode.status_description == "auto: low battery protection (SBU + solar_and_utility)"
 
     def test_above_low_battery_protection_stays_normal(self):
         mode = create_battery_mode()
@@ -67,10 +74,27 @@ class TestAutoMode:
         assert mode.desired_output_priority == "SBU"
         assert mode.desired_charger_source == "solar_only"
 
-    def test_no_battery_forces_sub_solar_first(self):
+    def test_no_battery_switches_to_sub_solar_and_utility(self):
         mode = create_battery_mode()
-        assert mode.update(0, battery_present=False, bms_available=False) is not None
-        assert mode.state == "auto_low_battery"
+        result = mode.update(0, battery_present=False, bms_available=False)
+        assert result is not None
+        assert mode.state == "auto_no_battery"
+        assert mode.desired_output_priority == "SUB"
+        assert mode.desired_charger_source == "solar_and_utility"
+
+    def test_no_battery_stays_in_no_battery(self):
+        mode = create_battery_mode()
+        mode.update(0, battery_present=False, bms_available=False)
+        assert mode.update(0, battery_present=False, bms_available=False) is None
+        assert mode.state == "auto_no_battery"
+
+    def test_battery_returns_from_no_battery(self):
+        mode = create_battery_mode()
+        mode.update(0, battery_present=False, bms_available=False)
+        result = mode.update(50, battery_present=True, bms_available=True)
+        assert result is not None
+        assert "battery returned" in result
+        assert mode.state == "auto_normal"
 
     def test_inverter_capacity_fallback_uses_safety_margin(self):
         mode = create_battery_mode()
@@ -86,17 +110,19 @@ class TestAutoMode:
         mode = create_battery_mode()
         mode.accept_inverter_protection()
         assert mode.state == "auto_low_battery"
+        assert mode.desired_output_priority == "SBU"
+        assert mode.desired_charger_source == "solar_and_utility"
 
 
 class TestManualMode:
 
-    def test_grid_quick_charge_is_usb_solar_and_utility(self):
+    def test_grid_quick_charge_is_sbu_solar_and_utility(self):
         mode = create_battery_mode()
         mode.select("manual")
         assert mode.state == "manual_grid_charging"
-        assert mode.desired_output_priority == "USB"
+        assert mode.desired_output_priority == "SBU"
         assert mode.desired_charger_source == "solar_and_utility"
-        assert mode.status_description == "manual: grid quick charge (USB + solar_and_utility)"
+        assert mode.status_description == "manual: grid quick charge (SBU + solar_and_utility)"
 
     def test_keeps_grid_charging_below_target(self):
         mode = create_battery_mode()
@@ -104,15 +130,15 @@ class TestManualMode:
         assert mode.update(89, battery_present=True, bms_available=True) is None
         assert mode.state == "manual_grid_charging"
 
-    def test_target_reached_holds_sub_solar_first(self):
+    def test_target_reached_holds_sbu_solar_only(self):
         mode = create_battery_mode()
         mode.select("manual")
         assert mode.update(90, battery_present=True, bms_available=True) is not None
         assert mode.selected_mode == "manual"
         assert mode.state == "manual_charged"
-        assert mode.desired_output_priority == "SUB"
-        assert mode.desired_charger_source == "solar_first"
-        assert mode.status_description == "manual: charged, holding (SUB + solar_first)"
+        assert mode.desired_output_priority == "SBU"
+        assert mode.desired_charger_source == "solar_only"
+        assert mode.status_description == "manual: charged, holding (SBU + solar_only)"
 
     def test_charged_does_not_restart_grid_charging_when_soc_drops(self):
         mode = create_battery_mode()
