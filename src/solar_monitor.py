@@ -27,8 +27,6 @@ from pi_throttle import read_throttled_hex, decode_active_flags
 
 BMS_OFFLINE_NO_SOLAR_TIMEOUT_SECONDS = 3 * 3600
 MODE_VERIFY_INTERVAL_SECONDS = 600
-PREEMPTIVE_SOC_MARGIN_PCT = 3
-SBU_REJECT_COOLDOWN_SECONDS = 20
 
 
 def notify_systemd(message):
@@ -80,7 +78,6 @@ class SolarMonitor:
         self.last_applied_priority = None
         self.output_priority_fault = False
         self.last_applied_charger_source = None
-        self._sbu_reject_cooldown_until = 0
 
         self.pv_efficiency = settings.PV_EFFICIENCY_DEFAULT
         self.pv2_pv1_ratio = settings.PV2_PV1_RATIO_DEFAULT
@@ -140,7 +137,6 @@ class SolarMonitor:
     def _handle_battery_mode(self, payload):
         if not self.battery_mode.select(payload):
             return
-        self._sbu_reject_cooldown_until = 0
         self.client.publish(f"{settings.BASE_TOPIC}/battery_mode/state", self.battery_mode.selected_mode)
         self.client.publish(f"{settings.BASE_TOPIC}/battery_mode/display", self.battery_mode.status_description)
         print(f"battery mode set to {self.battery_mode.status_description}", flush=True)
@@ -272,7 +268,8 @@ class SolarMonitor:
         battery_present, estimated_soc, battery_is_low, bms_available = self._assess_battery(inverter_data, can_data, now)
         self._check_bms_offline_fallback(inverter_data, bms_available, battery_present, now)
 
-        self._apply_battery_mode(estimated_soc, battery_present, bms_available)
+        if inverter_data is not None or bms_available:
+            self._apply_battery_mode(estimated_soc, battery_present, bms_available)
         self._verify_inverter_mode(estimated_soc, battery_present, now)
         ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
         inverter_online = self.inverter.has_recent_data(now)
@@ -459,7 +456,7 @@ class SolarMonitor:
             self._bms_offline_fallback_active = True
             self.battery_mode.accept_inverter_protection()
             print(f"WARNING: BMS offline and no solar charging for {int(elapsed / 3600)}h, "
-                  "forcing SUB and solar_and_utility charging", flush=True)
+                  "forcing solar_and_utility charging", flush=True)
 
     def _verify_inverter_mode(self, estimated_soc, battery_present, now):
         if self._last_mode_verify_time is not None:
@@ -467,10 +464,7 @@ class SolarMonitor:
                 return
         self._last_mode_verify_time = now
 
-        if not battery_present or self.battery_mode.selected_mode != "auto":
-            return
-
-        if now < self._sbu_reject_cooldown_until:
+        if self.battery_mode.selected_mode != "auto":
             return
 
         actual_priority = self.inverter.query_output_source_priority()
@@ -478,26 +472,9 @@ class SolarMonitor:
         if actual_priority is None:
             return
 
-        grid_stop_charging_soc = self.battery_mode.grid_stop_charging_soc_pct
-        preemptive_sub_soc = self.battery_mode.low_battery_protection_soc_pct + PREEMPTIVE_SOC_MARGIN_PCT
-
-        if actual_priority == "SUB" and estimated_soc >= grid_stop_charging_soc:
-            if self.battery_mode.is_low_battery_active:
-                self.battery_mode.clear_low_battery()
-            pop_command = OUTPUT_PRIORITY_TO_POP["SBU"]
-
-            if self.inverter.set_output_priority(pop_command):
-                self.last_applied_priority = "SBU"
-                print(f"mode verify: SUB → SBU (SOC {estimated_soc}% >= {grid_stop_charging_soc}%)", flush=True)
-            return
-
-        if actual_priority == "SBU" and estimated_soc <= preemptive_sub_soc:
-            self.battery_mode.accept_inverter_protection()
-            pop_command = OUTPUT_PRIORITY_TO_POP["SUB"]
-
-            if self.inverter.set_output_priority(pop_command):
-                self.last_applied_priority = "SUB"
-                print(f"mode verify: SBU → SUB (SOC {estimated_soc}% <= {preemptive_sub_soc}%)", flush=True)
+        if actual_priority != self.last_applied_priority:
+            print(f"mode verify: inverter on {actual_priority} (tracking was {self.last_applied_priority})", flush=True)
+            self.last_applied_priority = actual_priority
 
     def _apply_battery_mode(self, estimated_soc, battery_present, bms_available):
         inverter_capacity_pct = None
@@ -522,8 +499,8 @@ class SolarMonitor:
         if desired_priority == self.last_applied_priority:
             return
 
-        now = time.time()
-        if desired_priority == "SBU" and now < self._sbu_reject_cooldown_until:
+        # POP02 (SBU) is blocked by firmware — SBU must be set via LCD
+        if desired_priority == "SBU":
             return
 
         pop_command = OUTPUT_PRIORITY_TO_POP[desired_priority]
@@ -531,23 +508,11 @@ class SolarMonitor:
         if self.inverter.set_output_priority(pop_command):
             self.last_applied_priority = desired_priority
             self.output_priority_fault = False
-            if desired_priority == "SBU":
-                self._sbu_reject_cooldown_until = 0
             print(f"output priority: {desired_priority} (SOC {estimated_soc}%)", flush=True)
             return
 
         self.output_priority_fault = True
-        actual_priority = self.inverter.query_output_source_priority()
-
-        if actual_priority is not None:
-            self.last_applied_priority = actual_priority
-        if desired_priority == "SBU" and self.last_applied_priority == "SUB":
-            self._sbu_reject_cooldown_until = now + SBU_REJECT_COOLDOWN_SECONDS
-            self.battery_mode.accept_inverter_protection()
-            print(f"inverter rejected SBU, accepting SUB, retry in {SBU_REJECT_COOLDOWN_SECONDS}s "
-                  f"(SOC {estimated_soc}%, inverter cap {inverter_capacity_pct}%)", flush=True)
-        else:
-            print(f"output priority command failed: wanted {desired_priority}", flush=True)
+        print(f"output priority command failed: wanted {desired_priority}", flush=True)
 
     def _apply_charger_source(self):
         effective_charger = self.battery_mode.desired_charger_source
