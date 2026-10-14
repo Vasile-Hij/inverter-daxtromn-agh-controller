@@ -6,6 +6,7 @@ POLL_INTERVAL_SECONDS.
 """
 
 import glob
+import json
 import os
 import socket
 import sys
@@ -17,7 +18,7 @@ import settings
 from alarm import Alarm
 from batteries.battery import estimate_soc_from_voltage
 from batteries.can_battery import CanBattery
-from inverter.battery_mode import BatteryMode, OUTPUT_PRIORITY_TO_POP
+from inverter.battery_mode import BatteryMode
 from inverter.inverter import DaxtromnInverter, BATTERY_CURRENT_NOISE_A, COMMAND_MAX_RETRIES
 from inverter.pi30 import is_number
 from mqtt.home_assistant import HomeAssistantDiscovery
@@ -42,6 +43,10 @@ def notify_systemd(message):
     notify_socket.close()
 
 
+SOC_SETTING_KEYS = ("low_battery_protection_soc_pct", "grid_stop_charging_soc_pct", "grid_quick_charge_soc_pct")
+VOLTAGE_SETTING_KEYS = ("back_to_grid_v", "back_to_battery_v")
+
+
 class SolarMonitor:
     """Main application: ties together meter, inverter, N-PE bonding, and MQTT."""
 
@@ -64,6 +69,9 @@ class SolarMonitor:
             settings.GRID_STOP_CHARGING_SOC_PCT,
             settings.GRID_QUICK_CHARGE_SOC_PCT,
         )
+        self.back_to_grid_v = settings.BACK_TO_GRID_V
+        self.back_to_battery_v = settings.BACK_TO_BATTERY_V
+        self._load_soc_settings()
         self.undervoltage_alarm = Alarm("pi-undervoltage", settings.ALARM_REPEAT_SECONDS)
 
         self.client = mqtt.Client()
@@ -78,6 +86,7 @@ class SolarMonitor:
         self.last_applied_priority = None
         self.output_priority_fault = False
         self.last_applied_charger_source = None
+        self.actual_voltage_thresholds = None
 
         self.pv_efficiency = settings.PV_EFFICIENCY_DEFAULT
         self.pv2_pv1_ratio = settings.PV2_PV1_RATIO_DEFAULT
@@ -96,6 +105,8 @@ class SolarMonitor:
             settings.LOW_BATTERY_PROTECTION_SOC_TOPIC: self._handle_low_battery_protection_soc,
             settings.GRID_STOP_CHARGING_SOC_TOPIC: self._handle_grid_stop_charging_soc,
             settings.GRID_QUICK_CHARGE_SOC_TOPIC: self._handle_grid_quick_charge_soc,
+            settings.BACK_TO_GRID_V_TOPIC: self._handle_back_to_grid_v,
+            settings.BACK_TO_BATTERY_V_TOPIC: self._handle_back_to_battery_v,
         }
         self._source_mtimes = self._snapshot_source_mtimes()
 
@@ -184,6 +195,30 @@ class SolarMonitor:
             return
         self.battery_mode.low_battery_protection_soc_pct = value
         print(f"low battery protection set to {value}%", flush=True)
+        self._save_soc_settings()
+
+    def _load_soc_settings(self):
+        try:
+            with open(settings.SOC_SETTINGS_FILE) as f:
+                saved = json.load(f)
+        except (OSError, ValueError):
+            return
+        for key in SOC_SETTING_KEYS:
+            if isinstance(saved.get(key), int):
+                setattr(self.battery_mode, key, saved[key])
+        for key in VOLTAGE_SETTING_KEYS:
+            if isinstance(saved.get(key), (int, float)):
+                setattr(self, key, float(saved[key]))
+        print(f"loaded SOC settings: {saved}", flush=True)
+
+    def _save_soc_settings(self):
+        values = {key: getattr(self.battery_mode, key) for key in SOC_SETTING_KEYS}
+        values.update({key: getattr(self, key) for key in VOLTAGE_SETTING_KEYS})
+        try:
+            with open(settings.SOC_SETTINGS_FILE, "w") as f:
+                json.dump(values, f)
+        except OSError as error:
+            print(f"failed to save SOC settings: {error}", flush=True)
 
     def _handle_grid_stop_charging_soc(self, payload):
         value = self._parse_soc_in_range(payload, settings.GRID_STOP_CHARGING_SOC_RANGE)
@@ -197,6 +232,7 @@ class SolarMonitor:
             return
         self.battery_mode.grid_stop_charging_soc_pct = value
         print(f"grid stop charging set to {value}%", flush=True)
+        self._save_soc_settings()
 
     def _handle_grid_quick_charge_soc(self, payload):
         value = self._parse_soc_in_range(payload, settings.GRID_QUICK_CHARGE_SOC_RANGE)
@@ -209,6 +245,54 @@ class SolarMonitor:
             return
         self.battery_mode.grid_quick_charge_soc_pct = value
         print(f"grid quick charge set to {value}%", flush=True)
+        self._save_soc_settings()
+
+    @staticmethod
+    def _parse_volts_in_range(payload, volts_range):
+        if not is_number(payload):
+            return None
+        value = round(float(payload) * 2) / 2
+        minimum, maximum = volts_range
+        if minimum <= value <= maximum:
+            return value
+        return None
+
+    def _handle_back_to_grid_v(self, payload):
+        value = self._parse_volts_in_range(payload, settings.BACK_TO_GRID_V_RANGE)
+        if value is None:
+            return
+        highest_allowed = self.back_to_battery_v - settings.BACK_TO_BATTERY_MINIMUM_GAP_V
+        if value > highest_allowed:
+            print(f"rejected back to grid {value}V: maximum is {highest_allowed}V", flush=True)
+            return
+        self.back_to_grid_v = value
+        print(f"back to grid voltage set to {value}V", flush=True)
+        self._save_soc_settings()
+
+    def _handle_back_to_battery_v(self, payload):
+        value = self._parse_volts_in_range(payload, settings.BACK_TO_BATTERY_V_RANGE)
+        if value is None:
+            return
+        lowest_allowed = self.back_to_grid_v + settings.BACK_TO_BATTERY_MINIMUM_GAP_V
+        if value < lowest_allowed:
+            print(f"rejected back to battery {value}V: minimum is {lowest_allowed}V", flush=True)
+            return
+        self.back_to_battery_v = value
+        print(f"back to battery voltage set to {value}V", flush=True)
+        self._save_soc_settings()
+
+    def _apply_voltage_thresholds(self):
+        desired = (self.back_to_grid_v, self.back_to_battery_v)
+        if self.actual_voltage_thresholds == desired:
+            return
+        actual = self.actual_voltage_thresholds or (None, None)
+        for threshold_index, command_prefix, program in ((0, "PBCV", 12), (1, "PBDV", 13)):
+            if actual[threshold_index] == desired[threshold_index]:
+                continue
+            if not self.inverter.set_battery_voltage_threshold(command_prefix, threshold_index, desired[threshold_index]):
+                return
+            print(f"program {program}: {desired[threshold_index]}V", flush=True)
+        self.actual_voltage_thresholds = desired
 
     def _connect_mqtt(self):
         self.client.username_pw_set(settings.MQTT_USER, settings.MQTT_PASSWORD)
@@ -224,6 +308,9 @@ class SolarMonitor:
         if initial_priority is not None:
             self.last_applied_priority = initial_priority
             print(f"initial output priority: {initial_priority}", flush=True)
+
+        self.actual_voltage_thresholds = self.inverter.query_battery_voltage_thresholds()
+        print(f"initial program 12/13: {self.actual_voltage_thresholds}", flush=True)
 
         initial_charger_source = self.inverter.query_charger_source_priority()
 
@@ -270,6 +357,8 @@ class SolarMonitor:
 
         if inverter_data is not None or bms_available:
             self._apply_battery_mode(estimated_soc, battery_present, bms_available)
+        if inverter_data is not None:
+            self._apply_voltage_thresholds()
         self._verify_inverter_mode(estimated_soc, battery_present, now)
         ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
         inverter_online = self.inverter.has_recent_data(now)
@@ -464,17 +553,27 @@ class SolarMonitor:
                 return
         self._last_mode_verify_time = now
 
-        if self.battery_mode.selected_mode != "auto":
-            return
-
         actual_priority = self.inverter.query_output_source_priority()
-
-        if actual_priority is None:
-            return
-
-        if actual_priority != self.last_applied_priority:
-            print(f"mode verify: inverter on {actual_priority} (tracking was {self.last_applied_priority})", flush=True)
+        if actual_priority is not None:
+            self.client.publish(f"{settings.BASE_TOPIC}/inverter/actual_output_priority", actual_priority, retain=True)
+            if actual_priority != self.last_applied_priority:
+                print(f"mode verify: inverter output priority is {actual_priority}", flush=True)
             self.last_applied_priority = actual_priority
+
+        actual_thresholds = self.inverter.query_battery_voltage_thresholds()
+        if actual_thresholds is not None:
+            if actual_thresholds != self.actual_voltage_thresholds:
+                print(f"mode verify: inverter program 12/13 is {actual_thresholds}", flush=True)
+            self.actual_voltage_thresholds = actual_thresholds
+
+        actual_charger = self.inverter.query_charger_source_priority()
+        if actual_charger is not None:
+            self.client.publish(f"{settings.BASE_TOPIC}/inverter/actual_charger_source", actual_charger, retain=True)
+            if actual_charger != self.last_applied_charger_source:
+                # Changed on the LCD or a command did not stick: next cycle re-sends the desired source.
+                print(f"mode verify: inverter charger source is {actual_charger}, "
+                      f"expected {self.last_applied_charger_source}", flush=True)
+            self.last_applied_charger_source = actual_charger
 
     def _apply_battery_mode(self, estimated_soc, battery_present, bms_available):
         inverter_capacity_pct = None
@@ -489,30 +588,8 @@ class SolarMonitor:
         if mode_change is not None:
             print(f"battery mode: {mode_change}", flush=True)
 
-        self._apply_output_priority(estimated_soc, inverter_capacity_pct)
         self._apply_charger_source()
         self._publish_battery_mode_state()
-
-    def _apply_output_priority(self, estimated_soc, inverter_capacity_pct):
-        desired_priority = self.battery_mode.desired_output_priority
-
-        if desired_priority == self.last_applied_priority:
-            return
-
-        # POP02 (SBU) is blocked by firmware — SBU must be set via LCD
-        if desired_priority == "SBU":
-            return
-
-        pop_command = OUTPUT_PRIORITY_TO_POP[desired_priority]
-
-        if self.inverter.set_output_priority(pop_command):
-            self.last_applied_priority = desired_priority
-            self.output_priority_fault = False
-            print(f"output priority: {desired_priority} (SOC {estimated_soc}%)", flush=True)
-            return
-
-        self.output_priority_fault = True
-        print(f"output priority command failed: wanted {desired_priority}", flush=True)
 
     def _apply_charger_source(self):
         effective_charger = self.battery_mode.desired_charger_source
@@ -526,6 +603,8 @@ class SolarMonitor:
         if self.inverter.set_charger_source(pcp_command):
             self.last_applied_charger_source = effective_charger
             print(f"charger source: {effective_charger}", flush=True)
+            return
+        print(f"charger source command failed: wanted {effective_charger}", flush=True)
 
     def _publish_battery_mode_state(self):
         self.client.publish(f"{settings.BASE_TOPIC}/battery_mode/state", self.battery_mode.selected_mode)
@@ -544,6 +623,8 @@ class SolarMonitor:
                             self.battery_mode.grid_stop_charging_soc_pct)
         self.client.publish(f"{settings.BASE_TOPIC}/battery/grid_quick_charge_soc/state",
                             self.battery_mode.grid_quick_charge_soc_pct)
+        self.client.publish(f"{settings.BASE_TOPIC}/battery/back_to_grid_v/state", self.back_to_grid_v)
+        self.client.publish(f"{settings.BASE_TOPIC}/battery/back_to_battery_v/state", self.back_to_battery_v)
 
     def _apply_npe_bonding(self, ac_input_voltage_v, grid_power_w, zmai_online, inverter_online, now):
         desired_bond_state = self.npe_bonding.decide(ac_input_voltage_v, grid_power_w, zmai_online, inverter_online, now)

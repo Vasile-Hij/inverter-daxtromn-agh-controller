@@ -18,3 +18,4 @@ __pycache__/
 
 # system
 CACHEDIR.TAG
+soc_settings.json

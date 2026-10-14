@@ -29,7 +29,15 @@ GRID_STOP_CHARGING_MINIMUM_GAP_PCT = 15
 GRID_STOP_CHARGING_SOC_PCT = 30
 GRID_STOP_CHARGING_SOC_RANGE = (LOW_BATTERY_PROTECTION_SOC_RANGE[0] + GRID_STOP_CHARGING_MINIMUM_GAP_PCT, 100)
 GRID_QUICK_CHARGE_SOC_PCT = 90
+SOC_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "soc_settings.json")
 GRID_QUICK_CHARGE_SOC_RANGE = (30, 100)
+# LCD program 12: SBU moves the load to grid below this voltage; must stay above where the BMS cuts out (~46V).
+BACK_TO_GRID_V = 49.0
+BACK_TO_GRID_V_RANGE = (44.0, 51.0)
+# LCD program 13: SBU moves the load back to battery above this voltage.
+BACK_TO_BATTERY_V = 52.0
+BACK_TO_BATTERY_V_RANGE = (48.0, 58.0)
+BACK_TO_BATTERY_MINIMUM_GAP_V = 2.0
 
 POLL_INTERVAL_SECONDS = 5
 
@@ -53,6 +61,8 @@ BATTERY_MODE_TOPIC = f"{BASE_TOPIC}/battery_mode/set"
 LOW_BATTERY_PROTECTION_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_stop_soc/set"
 GRID_STOP_CHARGING_SOC_TOPIC = f"{BASE_TOPIC}/battery/discharge_resume_soc/set"
 GRID_QUICK_CHARGE_SOC_TOPIC = f"{BASE_TOPIC}/battery/grid_quick_charge_soc/set"
+BACK_TO_GRID_V_TOPIC = f"{BASE_TOPIC}/battery/back_to_grid_v/set"
+BACK_TO_BATTERY_V_TOPIC = f"{BASE_TOPIC}/battery/back_to_battery_v/set"
 
 CAN_INTERFACE = "can0"
 CAN_BATTERY_STALE_SECONDS = 30
