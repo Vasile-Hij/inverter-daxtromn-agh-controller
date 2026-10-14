@@ -35,7 +35,7 @@ Wants=network-pre.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/ip link set can0 up type can bitrate 500000
+ExecStart=/sbin/ip link set can0 up type can bitrate 500000 restart-ms 100
 ExecStop=/sbin/ip link set can0 down
 
 [Install]

@@ -23,6 +23,8 @@ class DaxtromnInverter(PI30Connection):
 
     QPIRI_OUTPUT_SOURCE_INDEX = 16
     QPIRI_CHARGER_SOURCE_INDEX = 17
+    QPIRI_BACK_TO_GRID_V_INDEX = 8
+    QPIRI_BACK_TO_BATTERY_V_INDEX = 22
     OUTPUT_SOURCE_NAMES = {0: "USB", 1: "SUB", 2: "SBU"}
     CHARGER_SOURCE_NAMES = {0: "utility_first", 1: "solar_first", 2: "solar_and_utility", 3: "solar_only"}
 
@@ -116,6 +118,31 @@ class DaxtromnInverter(PI30Connection):
             return None
         return code_names.get(int(float(raw_value)))
 
+    def query_battery_voltage_thresholds(self):
+        """Returns (back_to_grid_v, back_to_battery_v) — LCD programs 12 and 13."""
+        payload = self.extract_payload(self.send_command("QPIRI"))
+        if payload is None:
+            return None
+        fields = payload.split()
+        if len(fields) <= self.QPIRI_BACK_TO_BATTERY_V_INDEX:
+            return None
+        back_to_grid_v = fields[self.QPIRI_BACK_TO_GRID_V_INDEX]
+        back_to_battery_v = fields[self.QPIRI_BACK_TO_BATTERY_V_INDEX]
+        if not is_number(back_to_grid_v) or not is_number(back_to_battery_v):
+            return None
+        return float(back_to_grid_v), float(back_to_battery_v)
+
+    def set_battery_voltage_threshold(self, command_prefix, threshold_index, volts):
+        """PBCV (program 12) or PBDV (program 13). The reply is often garbled, so the read-back decides."""
+        command_text = f"{command_prefix}{volts:.1f}"
+        self.send_command(command_text)
+        time.sleep(1)
+        thresholds = self.query_battery_voltage_thresholds()
+        if thresholds is None or abs(thresholds[threshold_index] - volts) > 0.05:
+            print(f"{command_text} not applied: inverter reports {thresholds}", flush=True)
+            return False
+        return True
+
     def query_output_source_priority(self):
         return self._query_qpiri_field(self.QPIRI_OUTPUT_SOURCE_INDEX, self.OUTPUT_SOURCE_NAMES)
 
@@ -153,7 +180,17 @@ class DaxtromnInverter(PI30Connection):
         return False
 
     def set_charger_source(self, pcp_command):
-        return self._command_failure_reason(pcp_command) is None
+        failure_reason = self._command_failure_reason(pcp_command)
+        if failure_reason is not None:
+            print(f"set_charger_source failed: {failure_reason}", flush=True)
+            return False
+        expected_name = self.CHARGER_SOURCE_NAMES.get(int(pcp_command[3:]))
+        time.sleep(1)
+        actual_source = self.query_charger_source_priority()
+        if actual_source != expected_name:
+            print(f"set_charger_source: {pcp_command} ACKed but inverter reports {actual_source}", flush=True)
+            return False
+        return True
 
     def is_battery_present(self, inverter_data):
         if inverter_data is None:

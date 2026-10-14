@@ -55,6 +55,8 @@ ENERGY_SENSORS = [
 
 # (object_id, name, state_topic)
 TEXT_SENSORS = [
+    ("inverter_actual_output_priority", "Inverter Output Priority (actual)", f"{settings.BASE_TOPIC}/inverter/actual_output_priority"),
+    ("inverter_actual_charger_source", "Inverter Charger Source (actual)", f"{settings.BASE_TOPIC}/inverter/actual_charger_source"),
     ("zmai_data", "ZMAi-90 Data Status", f"{settings.BASE_TOPIC}/zmai/data_status"),
     ("inverter_data", "Daxtromn Data Status", f"{settings.BASE_TOPIC}/inverter/data_status"),
     ("can_battery_data", "CAN Battery Data Status", f"{settings.BASE_TOPIC}/can_battery/data_status"),
@@ -89,6 +91,10 @@ NUMBERS = [
      settings.GRID_STOP_CHARGING_SOC_TOPIC, *settings.GRID_STOP_CHARGING_SOC_RANGE, 1, "%"),
     ("grid_quick_charge_soc", "Grid Quick Charge", f"{settings.BASE_TOPIC}/battery/grid_quick_charge_soc/state",
      settings.GRID_QUICK_CHARGE_SOC_TOPIC, *settings.GRID_QUICK_CHARGE_SOC_RANGE, 1, "%"),
+    ("back_to_grid_v", "Back To Grid Voltage (prog 12)", f"{settings.BASE_TOPIC}/battery/back_to_grid_v/state",
+     settings.BACK_TO_GRID_V_TOPIC, *settings.BACK_TO_GRID_V_RANGE, 0.5, "V"),
+    ("back_to_battery_v", "Back To Battery Voltage (prog 13)", f"{settings.BASE_TOPIC}/battery/back_to_battery_v/state",
+     settings.BACK_TO_BATTERY_V_TOPIC, *settings.BACK_TO_BATTERY_V_RANGE, 0.5, "V"),
 ]
 
 
@@ -161,6 +167,7 @@ class HomeAssistantDiscovery:
                 "name": name,
                 "state_topic": state_topic,
                 "command_topic": command_topic,
+                "retain": True,
                 "options": list(options),
             })
 
@@ -170,6 +177,7 @@ class HomeAssistantDiscovery:
                 "name": name,
                 "state_topic": state_topic,
                 "command_topic": command_topic,
+                "retain": True,
                 "min": minimum,
                 "max": maximum,
                 "step": step,
