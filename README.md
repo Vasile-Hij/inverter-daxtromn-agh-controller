@@ -25,6 +25,7 @@ Program 01 = **SBU**, set on the LCD (firmware NAKs POP02 over serial; the Pi ne
 | BMS offline fallback | no BMS + no solar 3h | SNU |
 
 Programs 12/13 (back to grid / back to battery): 49.0V / 52.0V. In SBU the inverter moves the load to grid below 49V (battery dies ~46V).
+Low battery raises them to 51.0V / 58.0V (both maximums): the load goes to grid once the battery is at or below 51V, and stays there until Grid Stop Charging SOC, when the HA values return.
 
 All thresholds are HA numbers (retained MQTT + `soc_settings.json`). Every inverter setting is read back after sending and re-checked every 10 min.
 

@@ -281,8 +281,15 @@ class SolarMonitor:
         print(f"back to battery voltage set to {value}V", flush=True)
         self._save_soc_settings()
 
+    def _desired_voltage_thresholds(self):
+        # SBU only leaves the battery below program 12, so low battery protection raises 12 to its maximum
+        # and 13 above the BMS charge limit: the load stays on grid until protection ends.
+        if self.battery_mode.holds_load_on_grid:
+            return settings.BACK_TO_GRID_V_RANGE[1], settings.BACK_TO_BATTERY_V_RANGE[1]
+        return self.back_to_grid_v, self.back_to_battery_v
+
     def _apply_voltage_thresholds(self):
-        desired = (self.back_to_grid_v, self.back_to_battery_v)
+        desired = self._desired_voltage_thresholds()
         if self.actual_voltage_thresholds == desired:
             return
         actual = self.actual_voltage_thresholds or (None, None)

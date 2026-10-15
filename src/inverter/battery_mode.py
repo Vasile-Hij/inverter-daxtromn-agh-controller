@@ -2,7 +2,8 @@
 
 Output priority stays SBU, set once on the LCD: POP02 is blocked by firmware for LIb batteries,
 so any POP01 (SUB) the software sent could never be undone. With no usable battery, SBU already
-runs the load from the grid. Software only controls the charger source (PCP commands).
+runs the load from the grid. Software controls the charger source (PCP commands), and in
+low battery protection moves the load to grid through programs 12/13 (hold_load_on_grid).
 """
 
 BATTERY_MODES = ("auto", "manual")
@@ -13,26 +14,31 @@ STATE_SETTINGS = {
         "description": "auto: normal",
         "output_priority": "SBU",
         "charger_source": "solar_only",
+        "hold_load_on_grid": False,
     },
     "auto_low_battery": {
         "description": "auto: low battery protection",
         "output_priority": "SBU",
         "charger_source": "solar_first",
+        "hold_load_on_grid": True,
     },
     "auto_no_battery": {
         "description": "auto: no battery",
         "output_priority": "SBU",
         "charger_source": "solar_and_utility",
+        "hold_load_on_grid": False,
     },
     "manual_grid_charging": {
         "description": "manual: grid quick charge",
         "output_priority": "SBU",
         "charger_source": "solar_and_utility",
+        "hold_load_on_grid": False,
     },
     "manual_charged": {
         "description": "manual: charged, holding",
         "output_priority": "SBU",
         "charger_source": "solar_only",
+        "hold_load_on_grid": False,
     },
 }
 
@@ -75,6 +81,10 @@ class BatteryMode:
     @property
     def desired_charger_source(self):
         return STATE_SETTINGS[self.state]["charger_source"]
+
+    @property
+    def holds_load_on_grid(self):
+        return STATE_SETTINGS[self.state]["hold_load_on_grid"]
 
     @property
     def status_description(self):
