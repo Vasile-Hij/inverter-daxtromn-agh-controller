@@ -2,15 +2,22 @@
 
 Raspberry Pi 4 controller for a Daxtromn AGH 10.2kW inverter (2 MPPT), DAH 16S LiFePO4 battery, ZMAi-90 grid meter and N-PE bonding relay. Publishes everything to Home Assistant via MQTT.
 
+## Known issues
+
+- **PV2 not reported** by the inverter; derived: `(ac_output - grid) / efficiency - battery - pv1`.
+- **N-PE leak** when islanding; SSR bonds N-PE only when off-grid (ZMAi-90 + inverter, 3s delay). If bonding is missing when inverter is not consuming energy from grid (off-grid or islanding), it leaks 90V on N wire being a fire hazards and damaging electrical/electronic devices. Warning: in TN-C-S system it is forbidden to wire N to PE while linked to grid!
+
 ## Hardware
+
+It can work with or without Home Assistant! Some fields can be changed from HA: charging battery mode: auto (solar priority), manual (charge from grid in case a grid surge is scheduled and sun it is not enough to charge battery in full). Battery voltage or percentage of battery multiple-thresholds. 
 
 | Device | Link |
 |---|---|
 | Daxtromn inverter | RS232 (PI30), FTDI USB |
 | DAH battery | CAN 500kbps (MCP2515), battery port `CAN` |
 | Inverter ↔ battery | RS485 RJ45, battery port `485` (program 05 = LIC/LIP) |
-| ZMAi-90 meter | MQTT (OpenBeken) |
-| N-PE SSR 25A | GPIO 27 |
+| ZMAi-90 meter | MQTT (reflashed from Tuya to OpenBeken) |
+| N-PE SSR 25A | Relays 25A + GPIO 27 |
 
 ## Battery strategy
 
