@@ -69,6 +69,25 @@ class TestAutoMode:
         assert mode.desired_charger_source == "solar_first"
         assert mode.status_description == "auto: low battery protection (SBU + solar_first)"
 
+    def test_low_battery_protection_holds_load_on_grid(self):
+        mode = create_battery_mode()
+        assert mode.holds_load_on_grid is False
+        mode.update(10, battery_present=True, bms_available=True)
+        assert mode.holds_load_on_grid is True
+
+    def test_grid_stop_charging_releases_load_from_grid(self):
+        mode = create_battery_mode()
+        mode.update(8, battery_present=True, bms_available=True)
+        mode.update(30, battery_present=True, bms_available=True)
+        assert mode.holds_load_on_grid is False
+
+    def test_only_low_battery_protection_holds_load_on_grid(self):
+        mode = create_battery_mode()
+        confirm_no_battery(mode)
+        assert mode.holds_load_on_grid is False
+        mode.select("manual")
+        assert mode.holds_load_on_grid is False
+
     def test_above_low_battery_protection_stays_normal(self):
         mode = create_battery_mode()
         assert mode.update(11, battery_present=True, bms_available=True) is None
