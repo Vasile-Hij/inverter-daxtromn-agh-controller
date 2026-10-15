@@ -9,15 +9,16 @@ Raspberry Pi 4 controller for a Daxtromn AGH 10.2kW inverter (2 MPPT), DAH 16S L
 
 ## Hardware
 
-It can work with or without Home Assistant! Some fields can be changed from HA: charging battery mode: auto (solar priority), manual (charge from grid in case a grid surge is scheduled and sun it is not enough to charge battery in full). Battery voltage or percentage of battery multiple-thresholds. 
+It can work with or without Home Assistant! Some fields can be changed from HA: charging battery mode: auto (solar priority), manual (charge from grid in case a grid surge is scheduled and sun it is not enough to charge battery in full). Also options for battery voltage or percentage of battery multiple-thresholds. 
 
-| Device | Link |
+| Device | Setup |
 |---|---|
-| Daxtromn inverter | RS232 (PI30), FTDI USB |
+| Raspberry-pi 4B | Works standalone or with HA |
+| Daxtromn inverter AGH 10.2kw | RS232 (PI30), FTDI USB to raspberry |
 | DAH battery | CAN 500kbps (MCP2515), battery port `CAN` |
 | Inverter ↔ battery | RS485 RJ45, battery port `485` (program 05 = LIC/LIP) |
 | ZMAi-90 meter | MQTT (reflashed from Tuya to OpenBeken) |
-| N-PE SSR 25A | Relays 25A + GPIO 27 |
+| N-PE SSR 25A | Relay 25A + GPIO 27 |
 
 ## Battery strategy
 
