@@ -1,11 +1,11 @@
 # Solar Monitor
 
-Raspberry Pi 4 controller for a Daxtromn AGH 10.2kW inverter (2 MPPT), DAH 16S LiFePO4 battery, ZMAi-90 grid meter and N-PE bonding relay. Publishes everything to Home Assistant via MQTT.
+Raspberry Pi 4 controller for a Daxtromn AGH 10.2kW inverter (2 MPPT), DAH 16S LiFePO4 battery 14.8kw, ZMAi-90 grid meter ([reflashed](https://www.elektroda.com/rtvforum/topic4014818.html) from Tuya to OpenBeken) and N-PE bonding relay. Publishes everything to Home Assistant via MQTT, but it can work standalone as well.
 
 ## Known issues
 
 - **PV2 not reported** by the inverter; derived: `(ac_output - grid) / efficiency - battery - pv1`.
-- **N-PE leak** when islanding; SSR bonds N-PE only when off-grid (ZMAi-90 + inverter, 3s delay). If bonding is missing when inverter is not consuming energy from grid (off-grid or islanding), it leaks 90V on N wire being a fire hazards and damaging electrical/electronic devices. Warning: in TN-C-S system it is forbidden to wire N to PE while linked to grid!
+- **N-PE leak** when islanding (decocted from grid despite it reads grid voltage); SSR (contactor  with heat sink is preferred instead of a relay) bonds N-PE only when off-grid (ZMAi-90 + inverter, 3s delay). If bonding is missing when inverter is not consuming energy from grid (off-grid or islanding), it leaks 90V on N wire being a fire hazards and damaging electrical/electronic devices. Warning: in TN-C-S system it is forbidden to wire N to PE while linked to grid!
 
 ## Hardware
 
