@@ -43,6 +43,7 @@ MEASUREMENT_SENSORS = [
     ("bms_cell_diff", "BMS Cell Voltage Diff", f"{settings.BASE_TOPIC}/can_battery/bms_cell_diff_mv", "mV", None),
     ("bms_temp_min", "BMS Temp Min", f"{settings.BASE_TOPIC}/can_battery/bms_temp_min_c", "°C", "temperature"),
     ("bms_temp_max", "BMS Temp Max", f"{settings.BASE_TOPIC}/can_battery/bms_temp_max_c", "°C", "temperature"),
+    ("grid_limiter_mcb_threshold", "Grid MCB Threshold", f"{settings.BASE_TOPIC}/grid_limiter/mcb_threshold_w", "W", "power"),
 ]
 
 # (object_id, name, state_topic, unit, device_class)
@@ -75,6 +76,8 @@ BINARY_SENSORS = [
     ("output_priority_fault", "Output Priority Command Fault", f"{settings.BASE_TOPIC}/output_priority/command_fault", "ON", "OFF", "problem"),
     ("battery_low_battery_active", "Battery Low Protection Active", f"{settings.BASE_TOPIC}/battery_mode/low_battery_active", "ON", "OFF", None),
     ("pi_undervoltage", "RPi Undervoltage", f"{settings.BASE_TOPIC}/pi/undervoltage", "ON", "OFF", "problem"),
+    ("grid_limiter_throttled", "Grid Limiter Throttled", f"{settings.BASE_TOPIC}/grid_limiter/throttled", "ON", "OFF", None),
+    ("grid_mcb_lockout", "Grid MCB Lockout", f"{settings.BASE_TOPIC}/grid_limiter/mcb_lockout", "ON", "OFF", "problem"),
 ]
 
 # (object_id, name, state_topic, command_topic, options)
@@ -95,6 +98,10 @@ NUMBERS = [
      settings.BACK_TO_GRID_V_TOPIC, *settings.BACK_TO_GRID_V_RANGE, 0.5, "V"),
     ("back_to_battery_v", "Back To Battery Voltage (prog 13)", f"{settings.BASE_TOPIC}/battery/back_to_battery_v/state",
      settings.BACK_TO_BATTERY_V_TOPIC, *settings.BACK_TO_BATTERY_V_RANGE, 0.5, "V"),
+    ("max_grid_power", "Max Grid Power", f"{settings.BASE_TOPIC}/grid_limiter/max_power_w/state",
+     settings.MAX_GRID_POWER_TOPIC, *settings.MAX_GRID_POWER_RANGE, 100, "W"),
+    ("mcb_rating", "MCB Rating", f"{settings.BASE_TOPIC}/grid_limiter/mcb_rating_a/state",
+     settings.MCB_RATING_TOPIC, *settings.MCB_RATING_RANGE, 1, "A"),
 ]
 
 

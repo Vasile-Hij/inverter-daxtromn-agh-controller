@@ -21,6 +21,7 @@ class DaxtromnInverter(PI30Connection):
     battery presence detection.
     """
 
+    QPIRI_MAX_AC_CHARGE_CURRENT_INDEX = 13
     QPIRI_OUTPUT_SOURCE_INDEX = 16
     QPIRI_CHARGER_SOURCE_INDEX = 17
     QPIRI_BACK_TO_GRID_V_INDEX = 8
@@ -178,6 +179,32 @@ class DaxtromnInverter(PI30Connection):
             if attempt < COMMAND_MAX_RETRIES:
                 time.sleep(COMMAND_RETRY_DELAY_SECONDS)
         return False
+
+    def query_max_ac_charge_current(self):
+        raw_response = self.send_command("QPIRI")
+        payload = self.extract_payload(raw_response)
+        if payload is None:
+            return None
+        fields = payload.split()
+        if len(fields) <= self.QPIRI_MAX_AC_CHARGE_CURRENT_INDEX:
+            return None
+        raw_value = fields[self.QPIRI_MAX_AC_CHARGE_CURRENT_INDEX]
+        if not is_number(raw_value):
+            return None
+        return int(float(raw_value))
+
+    def set_max_ac_charge_current(self, amps):
+        command_text = f"MUCHGC{amps:03d}"
+        failure_reason = self._command_failure_reason(command_text)
+        if failure_reason is not None:
+            print(f"set_max_ac_charge_current failed: {failure_reason}", flush=True)
+            return False
+        time.sleep(1)
+        actual_amps = self.query_max_ac_charge_current()
+        if actual_amps != amps:
+            print(f"set_max_ac_charge_current: {command_text} ACKed but inverter reports {actual_amps}A", flush=True)
+            return False
+        return True
 
     def set_charger_source(self, pcp_command):
         failure_reason = self._command_failure_reason(pcp_command)
