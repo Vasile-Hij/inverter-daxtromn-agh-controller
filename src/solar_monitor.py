@@ -489,21 +489,26 @@ class SolarMonitor:
                                 round(self.grid_import_energy_kwh, 3))
         self.last_energy_cycle_time = now
 
+    def _pv_total_from_ratio(self, pv1_power_w):
+        if pv1_power_w > settings.PV2_RATIO_MIN_PV1_W:
+            return pv1_power_w * (1 + self.pv2_pv1_ratio)
+        return pv1_power_w
+
     def _estimate_total_pv_watts(self, inverter_data, battery_contribution_w, grid_power_w):
         ac_output_w = inverter_data["ac_output_power_w"]
         pv1_power_w = inverter_data["pv1_power_w"]
-        total_pv_w = None
 
         if grid_power_w is not None:
             device_status = inverter_data.get("device_status", "00000000")
             ac_charging_from_grid = len(device_status) > 7 and device_status[7] == "1"
-            total_pv_as_import = (ac_output_w - grid_power_w) / self.pv_efficiency - battery_contribution_w
 
-            if ac_charging_from_grid or total_pv_as_import >= pv1_power_w:
-                total_pv_w = total_pv_as_import
+            if ac_charging_from_grid:
+                return self._pv_total_from_ratio(pv1_power_w)
 
-        if total_pv_w is None:
+            total_pv_w = (ac_output_w - grid_power_w) / self.pv_efficiency - battery_contribution_w
+        else:
             total_pv_w = ac_output_w / self.pv_efficiency - battery_contribution_w
+
         pv2_from_balance_w = total_pv_w - pv1_power_w
         if pv2_from_balance_w < pv1_power_w * 0.05 and pv1_power_w > settings.PV2_RATIO_MIN_PV1_W:
             total_pv_w = pv1_power_w * (1 + self.pv2_pv1_ratio)

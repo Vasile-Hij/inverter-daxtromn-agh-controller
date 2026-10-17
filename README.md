@@ -4,7 +4,7 @@ Raspberry Pi 4 controller for a Daxtromn AGH 10.2kW inverter (2 MPPT), DAH 16S L
 
 ## Known issues
 
-- **PV2 not reported** by the inverter; derived: `(ac_output - grid) / efficiency - battery - pv1`.
+- **PV2 not reported** by the inverter; derived from energy balance when grid is not charging the battery, or from PV1 × ratio when grid charges (balance is timing-sensitive during grid charging). See PV2 estimation below.
 - **N-PE leak** when islanding (decocted from grid despite it reads grid voltage); SSR (contactor  with heat sink is preferred instead of a relay) bonds N-PE only when off-grid (ZMAi-90 + inverter, 3s delay). If bonding is missing when inverter is not consuming energy from grid (off-grid or islanding), it leaks 90V on N wire being a fire hazards and damaging electrical/electronic devices. Warning: in TN-C-S system it is forbidden to wire N to PE while linked to grid!
 
 ## Hardware
@@ -37,10 +37,32 @@ Low battery raises them to 51.0V / 58.0V (both maximums): the load goes to grid 
 
 All thresholds are HA numbers (retained MQTT + `soc_settings.json`). Every inverter setting is read back after sending and re-checked every 10 min.
 
-## Known issues
+## Grid power limiter (MCB 32A protection)
 
-- **PV2 not reported** by the inverter; derived: `(ac_output - grid) / efficiency - battery - pv1`.
-- **N-PE leak** when islanding; SSR bonds N-PE only when off-grid (ZMAi-90 + inverter, 3s delay).
+Two-tier protection against overloading the grid MCB:
+
+| Tier | Trigger | Action | Resume |
+|---|---|---|---|
+| Soft limit | grid power ≥ configurable threshold (default 5000W) | switches charger to solar-only | grid drops below threshold − 500W hysteresis |
+| Hard limit (MCB) | grid power ≥ MCB rating × live voltage (32A × 240V = 7680W) | locks out grid charging for 30 min | automatic after lockout expires |
+
+MUCHGC (program 11) is set to the MCB rating as a hardware backstop — the inverter itself will not draw more than that from grid.
+
+Both the soft limit (W) and MCB rating (A) are adjustable from Home Assistant as number entities. Changes are persisted in `soc_settings.json`.
+
+## PV2 estimation
+
+Daxtromn AGH firmware does not expose PV2 via serial (QPIGS2/QP2GS0 return NAK). PV2 is derived from the energy balance:
+
+`pv_total = (ac_output − grid) / pv_efficiency − battery_contribution`
+
+`pv2 = pv_total − pv1`
+
+Where `battery_contribution = (discharge − charge) × voltage` (positive discharging, negative charging), and `pv_efficiency` (default 0.93) converts AC-side watts back to DC (grid passes through at 1:1, PV goes DC→AC with ~7% loss).
+
+**Grid charging bypass:** when the inverter charges the battery from grid (device_status bit 7 = 1), the energy balance is unreliable — ZMAi and QPIGS poll at different moments, and a small timing mismatch between the grid and battery terms inflates PV2 by hundreds of watts. In this state the formula falls back to `pv_total = pv1 × (1 + pv2_ratio)` where `pv2_ratio` (default 0.60) is adjustable via MQTT. Both panels see the same sky, so the ratio gives a stable estimate.
+
+**Low-PV2 fallback:** when the balance gives PV2 < 5% of PV1 and PV1 > 50W, the ratio is used instead (measurement noise dominates at small differences).
 
 ## Setup
 
