@@ -18,6 +18,7 @@ import settings
 from alarm import Alarm
 from batteries.battery import estimate_soc_from_voltage
 from batteries.can_battery import CanBattery
+from grid_limiter import GridPowerLimiter
 from inverter.battery_mode import BatteryMode
 from inverter.inverter import DaxtromnInverter, BATTERY_CURRENT_NOISE_A, COMMAND_MAX_RETRIES
 from inverter.pi30 import is_number
@@ -45,6 +46,7 @@ def notify_systemd(message):
 
 SOC_SETTING_KEYS = ("low_battery_protection_soc_pct", "grid_stop_charging_soc_pct", "grid_quick_charge_soc_pct")
 VOLTAGE_SETTING_KEYS = ("back_to_grid_v", "back_to_battery_v")
+LIMITER_SETTING_KEYS = ("max_grid_power_w", "mcb_rating_a")
 
 
 class SolarMonitor:
@@ -60,6 +62,11 @@ class SolarMonitor:
 
         self.inverter = DaxtromnInverter(settings.INVERTER_PORT, settings.INVERTER_BAUD, settings.INVERTER_STALE_SECONDS)
         self.can_battery = CanBattery(settings.CAN_INTERFACE, settings.CAN_BATTERY_STALE_SECONDS)
+        self.grid_limiter = GridPowerLimiter(
+            settings.MAX_GRID_POWER_W, settings.SOFT_LIMIT_HYSTERESIS_W,
+            settings.MCB_RATING_A, settings.GRID_NOMINAL_VOLTAGE_V,
+            settings.MCB_LOCKOUT_SECONDS,
+        )
         self.inverter_alarm = Alarm("inverter-silent", settings.ALARM_REPEAT_SECONDS)
         self.failsafe_alarm = Alarm("npe-failsafe-blind", settings.ALARM_REPEAT_SECONDS)
 
@@ -77,6 +84,8 @@ class SolarMonitor:
         self.client = mqtt.Client()
         self.discovery = HomeAssistantDiscovery(self.client)
         self._initialize_state()
+
+        self._applied_ac_charge_current_a = None
 
     def _initialize_state(self):
         self._bms_was_online = None
@@ -107,6 +116,8 @@ class SolarMonitor:
             settings.GRID_QUICK_CHARGE_SOC_TOPIC: self._handle_grid_quick_charge_soc,
             settings.BACK_TO_GRID_V_TOPIC: self._handle_back_to_grid_v,
             settings.BACK_TO_BATTERY_V_TOPIC: self._handle_back_to_battery_v,
+            settings.MAX_GRID_POWER_TOPIC: self._handle_max_grid_power,
+            settings.MCB_RATING_TOPIC: self._handle_mcb_rating,
         }
         self._source_mtimes = self._snapshot_source_mtimes()
 
@@ -209,11 +220,15 @@ class SolarMonitor:
         for key in VOLTAGE_SETTING_KEYS:
             if isinstance(saved.get(key), (int, float)):
                 setattr(self, key, float(saved[key]))
+        for key in LIMITER_SETTING_KEYS:
+            if isinstance(saved.get(key), (int, float)):
+                setattr(self.grid_limiter, key, int(saved[key]))
         print(f"loaded SOC settings: {saved}", flush=True)
 
     def _save_soc_settings(self):
         values = {key: getattr(self.battery_mode, key) for key in SOC_SETTING_KEYS}
         values.update({key: getattr(self, key) for key in VOLTAGE_SETTING_KEYS})
+        values.update({key: getattr(self.grid_limiter, key) for key in LIMITER_SETTING_KEYS})
         try:
             with open(settings.SOC_SETTINGS_FILE, "w") as f:
                 json.dump(values, f)
@@ -281,6 +296,27 @@ class SolarMonitor:
         print(f"back to battery voltage set to {value}V", flush=True)
         self._save_soc_settings()
 
+    def _handle_max_grid_power(self, payload):
+        if not is_number(payload):
+            return
+        value = int(float(payload))
+        minimum, maximum = settings.MAX_GRID_POWER_RANGE
+        if minimum <= value <= maximum:
+            self.grid_limiter.max_grid_power_w = value
+            print(f"max grid power set to {value}W", flush=True)
+            self._save_soc_settings()
+
+    def _handle_mcb_rating(self, payload):
+        if not is_number(payload):
+            return
+        value = int(float(payload))
+        minimum, maximum = settings.MCB_RATING_RANGE
+        if minimum <= value <= maximum:
+            self.grid_limiter.mcb_rating_a = value
+            self._applied_ac_charge_current_a = None
+            print(f"MCB rating set to {value}A", flush=True)
+            self._save_soc_settings()
+
     def _desired_voltage_thresholds(self):
         # SBU only leaves the battery below program 12, so low battery protection raises 12 to its maximum
         # and 13 above the BMS charge limit: the load stays on grid until protection ends.
@@ -300,6 +336,14 @@ class SolarMonitor:
                 return
             print(f"program {program}: {desired[threshold_index]}V", flush=True)
         self.actual_voltage_thresholds = desired
+
+    def _apply_max_ac_charge_current(self):
+        desired_amps = self.grid_limiter.mcb_rating_a
+        if self._applied_ac_charge_current_a == desired_amps:
+            return
+        if self.inverter.set_max_ac_charge_current(desired_amps):
+            self._applied_ac_charge_current_a = desired_amps
+            print(f"max AC charge current: {desired_amps}A", flush=True)
 
     def _connect_mqtt(self):
         self.client.username_pw_set(settings.MQTT_USER, settings.MQTT_PASSWORD)
@@ -325,6 +369,11 @@ class SolarMonitor:
             self.last_applied_charger_source = initial_charger_source
             print(f"initial charger source: {initial_charger_source}", flush=True)
 
+        initial_ac_charge_current = self.inverter.query_max_ac_charge_current()
+        if initial_ac_charge_current is not None:
+            self._applied_ac_charge_current_a = initial_ac_charge_current
+            print(f"initial max AC charge current: {initial_ac_charge_current}A", flush=True)
+
     def run(self):
         self._connect_mqtt()
         self._load_initial_inverter_state()
@@ -344,6 +393,9 @@ class SolarMonitor:
 
     def _run_cycle(self, now):
         zmai_online, grid_power_for_npe, grid_power_for_pv2 = self._publish_grid_readings(now)
+        grid_power_for_limiter = self.zmai_meter.power_w if zmai_online and self.zmai_meter.power_w is not None else None
+        grid_voltage_for_limiter = self.zmai_meter.voltage_v if zmai_online else None
+        self.grid_limiter.update(grid_power_for_limiter, grid_voltage_for_limiter, now)
         inverter_data = self.inverter.poll(now)
         battery_power_w = None
         pv_total_power_w = 0
@@ -366,6 +418,7 @@ class SolarMonitor:
             self._apply_battery_mode(estimated_soc, battery_present, bms_available)
         if inverter_data is not None:
             self._apply_voltage_thresholds()
+            self._apply_max_ac_charge_current()
         self._verify_inverter_mode(estimated_soc, battery_present, now)
         ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
         inverter_online = self.inverter.has_recent_data(now)
@@ -603,6 +656,9 @@ class SolarMonitor:
 
         if self._bms_offline_fallback_active:
             effective_charger = "solar_and_utility"
+        grid_limited = self.grid_limiter.is_throttled or self.grid_limiter.is_locked_out
+        if grid_limited and effective_charger in ("utility_first", "solar_and_utility"):
+            effective_charger = "solar_only"
         if effective_charger == self.last_applied_charger_source:
             return
         pcp_command = settings.CHARGER_SOURCE_TO_PCP[effective_charger]
@@ -623,6 +679,17 @@ class SolarMonitor:
                             "ON" if self.output_priority_fault else "OFF")
         self.client.publish(f"{settings.BASE_TOPIC}/charger_source/bms_offline_fallback",
                             "ON" if self._bms_offline_fallback_active else "OFF")
+        self.client.publish(f"{settings.BASE_TOPIC}/grid_limiter/throttled",
+                            "ON" if self.grid_limiter.is_throttled or self.grid_limiter.is_locked_out else "OFF")
+        self.client.publish(f"{settings.BASE_TOPIC}/grid_limiter/mcb_lockout",
+                            "ON" if self.grid_limiter.is_locked_out else "OFF")
+        self.client.publish(f"{settings.BASE_TOPIC}/grid_limiter/max_power_w/state",
+                            self.grid_limiter.max_grid_power_w)
+        self.client.publish(f"{settings.BASE_TOPIC}/grid_limiter/mcb_rating_a/state",
+                            self.grid_limiter.mcb_rating_a)
+        grid_voltage = self.zmai_meter.voltage_v if self.zmai_meter.voltage_v is not None else settings.GRID_NOMINAL_VOLTAGE_V
+        self.client.publish(f"{settings.BASE_TOPIC}/grid_limiter/mcb_threshold_w",
+                            round(self.grid_limiter.mcb_power_w(grid_voltage)))
 
         self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state",
                             self.battery_mode.low_battery_protection_soc_pct)
