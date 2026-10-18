@@ -14,7 +14,7 @@ It can work with or without Home Assistant! Some fields can be changed from HA: 
 | Device | Setup |
 |---|---|
 | Raspberry-pi 4B | Works standalone or with HA |
-| Daxtromn inverter AGH 10.2kw | RS232 (PI30), FTDI USB to raspberry |
+| Daxtromn inverter AGH 10.2kw | RS232 (PI30), RJ45 (FTDI) USB to raspberry (need rewiring for some cables) |
 | DAH battery | CAN 500kbps (MCP2515), battery port `CAN` |
 | Inverter ↔ battery | RS485 RJ45, battery port `485` (program 05 = LIC/LIP) |
 | ZMAi-90 meter | MQTT (reflashed from Tuya to OpenBeken) |
