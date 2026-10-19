@@ -50,6 +50,7 @@
 - the gateway firewall must permit the ZMAi (ZMAI_IP) -> pi (PI_IP):1883 when they sit on
   different VLANs; the ZMAi OpenBeken MQTT host must match PI_IP or it silently stops
   publishing (HA then shows the meter off while it is still on)
+- after the pi changes address run "just zmai-refresh" (also part of "just restart")
 - never write IP addresses or network vendor names in tracked files; LAN addresses live
   in .env (HA_IP, PI_IP, ZMAI_IP, TOMZN_IP) and docs refer to them by variable name
 - tailscale up after power surge
