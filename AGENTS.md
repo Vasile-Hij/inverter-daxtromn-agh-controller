@@ -10,7 +10,7 @@
 - ZMAi-90 -> mosquitto on pi (127.0.0.1:1883, user mqtt-rasp) -> solar_monitor.py
 - inverter -> RS232 -> solar_monitor.py
 - battery -> RS485 -> inverter -> solar_monitor.py
-- solar_monitor.py -> solar/# + homeassistant/# -> mosquitto bridge -> HA broker 10.10.10.31
+- solar_monitor.py -> solar/# + homeassistant/# -> mosquitto bridge -> HA broker (HA_IP)
 - HA -> solar/npe_bonding/mode/set -> bridge in -> solar_monitor.py
 - solar_monitor.py -> GPIO27 -> N-PE relay
 - solar_monitor.py -> energy-smart-meter-zmai-90/1/set -> ZMAi grid relay
@@ -47,7 +47,11 @@
 - the bridge (/etc/mosquitto/conf.d/local.conf) forwards solar/# out but only explicit
   command topics in; every new HA command topic (.../set) MUST be added there as
   "topic <topic> in 0" and mosquitto restarted, or HA selects silently do nothing
-- Omada gateway ACL permits VLAN3-IoT -> 10.10.10.20:1883
+- the gateway firewall must permit the ZMAi (ZMAI_IP) -> pi (PI_IP):1883 when they sit on
+  different VLANs; the ZMAi OpenBeken MQTT host must match PI_IP or it silently stops
+  publishing (HA then shows the meter off while it is still on)
+- never write IP addresses or network vendor names in tracked files; LAN addresses live
+  in .env (HA_IP, PI_IP, ZMAI_IP, TOMZN_IP) and docs refer to them by variable name
 - tailscale up after power surge
 - activate this project via sh script
 
