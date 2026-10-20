@@ -442,7 +442,8 @@ class SolarMonitor:
 
         net_current_a = inverter_data["battery_discharge_current_a"] - inverter_data["battery_charging_current_a"]
         battery_power_w = net_current_a * inverter_data["battery_voltage_v"]
-        self.client.publish(f"{settings.BASE_TOPIC}/derived/battery_power_w", battery_power_w)
+        # published as charging positive, discharging negative; internally discharge stays positive for the energy balance
+        self.client.publish(f"{settings.BASE_TOPIC}/derived/battery_power_w", -battery_power_w)
         self.client.publish(f"{settings.BASE_TOPIC}/derived/battery_charge_power_w", max(-battery_power_w, 0))
         self.client.publish(f"{settings.BASE_TOPIC}/derived/battery_discharge_power_w", max(battery_power_w, 0))
         self._accumulate_battery_energy(battery_power_w, now)
