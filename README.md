@@ -9,7 +9,7 @@ Raspberry Pi 4 controller for a Daxtromn AGH 10.2kW inverter (2 MPPT), DAH 16S L
 
 ## Hardware
 
-It can work with or without Home Assistant! Some fields can be changed from HA: charging battery mode: auto (solar priority, grid only when the battery is low), solar only, solar and grid, grid quick charge (charge from grid in case a grid surge is scheduled and sun it is not enough to charge battery in full). Also options for battery voltage or percentage of battery multiple-thresholds. 
+It can work with or without Home Assistant! Some fields can be changed from HA: charging battery mode: auto (solar priority, grid only when the battery is low), solar only, solar and grid, grid quick charge (charge from grid in case a grid surge is scheduled and sun it is not enough to charge battery in full), eco (like auto, but never charges from grid: a low battery moves the house to grid and rests until solar recharges it). Also options for battery voltage or percentage of battery multiple-thresholds. 
 
 | Device | Setup |
 |---|---|
@@ -32,9 +32,17 @@ Program 01 = **SBU**, set on the LCD (firmware NAKs POP02 over serial; the Pi ne
 | solar_only | | always, even with a low battery | OSO solar only |
 | solar_and_grid | | always, no SOC stop | SNU solar + grid |
 | grid_quick_charge | | until Grid Quick Charge SOC | SNU, then OSO |
-| any | BMS offline fallback | no BMS + no solar 3h | SNU |
+| eco | Normal | default | OSO solar only |
+| eco | Low battery | SOC ≤ Low Battery Protection until Grid Stop Charging, house on grid | OSO solar only |
+| eco | No battery | BMS cut off for 60s, house on grid | OSO solar only |
+| any but eco | BMS offline fallback | no BMS + no solar 3h | SNU |
 
 In solar_only the battery is not charged on cloudy days; the house stays powered because SBU moves the load to grid at program 12.
+
+eco never grid-charges, so program 11 (utility charging current, minimum 2A) has no effect in it; solar charging is
+capped by program 02 only. At low battery it holds the load on grid through programs 12/13 like auto, with OSO, so the
+battery neither discharges nor takes grid current, and PV recharges it. In the BMS offline fallback eco keeps the
+load on grid but stays on OSO.
 
 Programs 12/13 (back to grid / back to battery): 49.0V / 52.0V. In SBU the inverter moves the load to grid below 49V (battery dies ~46V).
 Low battery raises them to 51.0V / 58.0V (both maximums): the load goes to grid once the battery is at or below 51V, and stays there until Grid Stop Charging SOC, when the HA values return.

@@ -1,4 +1,4 @@
-from inverter.battery_mode import BatteryMode, BATTERY_MODES, BATTERY_MODE_DEFAULT, NO_BATTERY_CONFIRM_CYCLES
+from inverter.battery_mode import BatteryMode, BATTERY_MODES, BATTERY_MODE_DEFAULT, NO_BATTERY_CONFIRM_CYCLES, STATE_SETTINGS
 
 
 def confirm_no_battery(mode):
@@ -19,7 +19,7 @@ def create_battery_mode():
 class TestModeSelection:
 
     def test_selectable_modes(self):
-        assert BATTERY_MODES == ("auto", "solar_only", "solar_and_grid", "grid_quick_charge")
+        assert BATTERY_MODES == ("auto", "solar_only", "solar_and_grid", "grid_quick_charge", "eco")
 
     def test_former_manual_mode_is_rejected(self):
         mode = create_battery_mode()
@@ -255,6 +255,81 @@ class TestFixedChargerModes:
         confirm_no_battery(mode)
         assert mode.is_no_battery_active is False
         assert mode.desired_charger_source == "solar_only"
+
+
+class TestEcoMode:
+
+    def create_eco_mode(self):
+        mode = create_battery_mode()
+        mode.select("eco")
+        return mode
+
+    def test_normal_is_sbu_solar_only(self):
+        mode = self.create_eco_mode()
+        mode.update(60, battery_present=True, bms_available=True)
+        assert mode.state == "eco_normal"
+        assert mode.desired_charger_source == "solar_only"
+        assert mode.holds_load_on_grid is False
+
+    def test_low_battery_moves_load_to_grid_without_grid_charging(self):
+        mode = self.create_eco_mode()
+        message = mode.update(10, battery_present=True, bms_available=True)
+        assert message is not None
+        assert mode.state == "eco_low_battery"
+        assert mode.desired_output_priority == "SBU"
+        assert mode.desired_charger_source == "solar_only"
+        assert mode.holds_load_on_grid is True
+
+    def test_stays_on_grid_while_solar_recharges_below_grid_stop_charging(self):
+        mode = self.create_eco_mode()
+        mode.update(10, battery_present=True, bms_available=True)
+        mode.update(29, battery_present=True, bms_available=True)
+        assert mode.state == "eco_low_battery"
+
+    def test_grid_stop_charging_hands_load_back_to_battery(self):
+        mode = self.create_eco_mode()
+        mode.update(10, battery_present=True, bms_available=True)
+        mode.update(30, battery_present=True, bms_available=True)
+        assert mode.state == "eco_normal"
+        assert mode.holds_load_on_grid is False
+
+    def test_no_battery_holds_load_on_grid_without_grid_charging(self):
+        mode = self.create_eco_mode()
+        confirm_no_battery(mode)
+        assert mode.state == "eco_no_battery"
+        assert mode.desired_charger_source == "solar_only"
+        assert mode.holds_load_on_grid is True
+
+    def test_returned_battery_stays_on_grid_until_recovered(self):
+        mode = self.create_eco_mode()
+        confirm_no_battery(mode)
+        for _ in range(NO_BATTERY_CONFIRM_CYCLES):
+            mode.update(5, battery_present=True, bms_available=True)
+        assert mode.state == "eco_low_battery"
+        assert mode.desired_charger_source == "solar_only"
+
+    def test_inverter_protection_holds_load_on_grid(self):
+        mode = self.create_eco_mode()
+        mode.accept_inverter_protection()
+        assert mode.state == "eco_low_battery"
+        assert mode.desired_charger_source == "solar_only"
+
+    def test_reselecting_eco_keeps_low_battery(self):
+        mode = self.create_eco_mode()
+        mode.update(5, battery_present=True, bms_available=True)
+        mode.select("eco")
+        assert mode.is_low_battery_active is True
+
+    def test_only_eco_never_charges_from_grid(self):
+        mode = create_battery_mode()
+        for mode_name in BATTERY_MODES:
+            mode.select(mode_name)
+            assert mode.never_charges_from_grid is (mode_name == "eco")
+
+    def test_no_eco_state_charges_from_grid(self):
+        for state_name, state_settings in STATE_SETTINGS.items():
+            if state_name.startswith("eco_"):
+                assert state_settings["charger_source"] == "solar_only"
 
 
 class TestThresholdChanges:

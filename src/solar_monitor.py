@@ -668,7 +668,8 @@ class SolarMonitor:
     def _apply_charger_source(self):
         effective_charger = self.battery_mode.desired_charger_source
 
-        if self._bms_offline_fallback_active:
+        # eco keeps the fallback's load on grid (low battery hold) but never grid-charges
+        if self._bms_offline_fallback_active and not self.battery_mode.never_charges_from_grid:
             effective_charger = "solar_and_utility"
         if effective_charger not in settings.GRID_CHARGING_SOURCES:
             self.grid_limiter.reset_repeats()
