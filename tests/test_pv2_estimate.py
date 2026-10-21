@@ -17,6 +17,7 @@ def make_monitor(pv_efficiency=0.93, pv2_pv1_ratio=0.60):
     monitor = MagicMock(spec=SolarMonitor)
     monitor.pv_efficiency = pv_efficiency
     monitor.pv2_pv1_ratio = pv2_pv1_ratio
+    monitor._is_grid_charging = SolarMonitor._is_grid_charging
     monitor._pv_total_from_ratio = SolarMonitor._pv_total_from_ratio.__get__(monitor)
     monitor._estimate_total_pv_watts = SolarMonitor._estimate_total_pv_watts.__get__(monitor)
     return monitor
