@@ -9,7 +9,7 @@ Raspberry Pi 4 controller for a Daxtromn AGH 10.2kW inverter (2 MPPT), DAH 16S L
 
 ## Hardware
 
-It can work with or without Home Assistant! Some fields can be changed from HA: charging battery mode: auto (solar priority), manual (charge from grid in case a grid surge is scheduled and sun it is not enough to charge battery in full). Also options for battery voltage or percentage of battery multiple-thresholds. 
+It can work with or without Home Assistant! Some fields can be changed from HA: charging battery mode: auto (solar priority, grid only when the battery is low), solar only, solar and grid, grid quick charge (charge from grid in case a grid surge is scheduled and sun it is not enough to charge battery in full). Also options for battery voltage or percentage of battery multiple-thresholds. 
 
 | Device | Setup |
 |---|---|
@@ -24,31 +24,48 @@ It can work with or without Home Assistant! Some fields can be changed from HA: 
 
 Program 01 = **SBU**, set on the LCD (firmware NAKs POP02 over serial; the Pi never sends POP).
 
-| State | When | 16 (charger) |
-|---|---|---|
-| Normal | default | 050 solar only |
-| Low battery | SOC ≤ 10% until 30% | C50 solar first |
-| No battery | BMS cut off for 60s | SNU solar + grid |
-| Quick charge | manual, until 90% | SNU, then 050 |
-| BMS offline fallback | no BMS + no solar 3h | SNU |
+| Battery Mode (HA) | State | When | 16 (charger) |
+|---|---|---|---|
+| auto | Normal | default | OSO solar only |
+| auto | Low battery | SOC ≤ Low Battery Protection until Grid Stop Charging | CSO solar first |
+| auto | No battery | BMS cut off for 60s | SNU solar + grid |
+| solar_only | | always, even with a low battery | OSO solar only |
+| solar_and_grid | | always, no SOC stop | SNU solar + grid |
+| grid_quick_charge | | until Grid Quick Charge SOC | SNU, then OSO |
+| any | BMS offline fallback | no BMS + no solar 3h | SNU |
+
+In solar_only the battery is not charged on cloudy days; the house stays powered because SBU moves the load to grid at program 12.
 
 Programs 12/13 (back to grid / back to battery): 49.0V / 52.0V. In SBU the inverter moves the load to grid below 49V (battery dies ~46V).
 Low battery raises them to 51.0V / 58.0V (both maximums): the load goes to grid once the battery is at or below 51V, and stays there until Grid Stop Charging SOC, when the HA values return.
 
 All thresholds are HA numbers (retained MQTT + `soc_settings.json`). Every inverter setting is read back after sending and re-checked every 10 min.
 
-## Grid power limiter (MCB 32A protection)
+## Grid MCB lockout (32A protection)
 
-Two-tier protection against overloading the grid MCB:
+When grid current (ZMAi) reaches the MCB rating **while the inverter is charging from grid**, the charger is
+switched to solar only, whatever the Battery Mode (solar first included: this inverter grid-charges in CSO even with PV).
 
-| Tier | Trigger | Action | Resume |
-|---|---|---|---|
-| Soft limit | grid power ≥ configurable threshold (default 5000W) | switches charger to solar-only | grid drops below threshold − 500W hysteresis |
-| Hard limit (MCB) | grid power ≥ MCB rating × live voltage (32A × 240V = 7680W) | locks out grid charging for 30 min | automatic after lockout expires |
+| Lockout | Grid charging paused for |
+|---|---|
+| 1st | 30 min |
+| 2nd | 1 h |
+| 3rd | 2 h |
+| 4th and later | until midnight |
 
-MUCHGC (program 11) is set to the MCB rating as a hardware backstop — the inverter itself will not draw more than that from grid.
+Repeats reset when grid charging is no longer wanted (target SOC reached or mode changed), and after a lockout that ran until midnight.
+Grid over the MCB rating from house load alone, with no grid charging, only raises the "Grid Over MCB Rating" alert:
+pausing the charger would change nothing.
 
-Both the soft limit (W) and MCB rating (A) are adjustable from Home Assistant as number entities. Changes are persisted in `soc_settings.json`.
+MCB rating (A) is an HA number, persisted in `soc_settings.json`.
+
+## Program 11 (max utility charging current)
+
+HA select with the values the inverter accepts (manual: 2, 10-140A, 150/160A on the 10.2kW model), in battery side DC amps.
+It shows the value read from the inverter (QPIRI), sends MUCHGC only when a new value is picked, and is re-read every 10 min.
+It is independent of the MCB rating: 30A DC is about 1.6kW, roughly 7A on the grid side.
+Observed: with the BMS connected (LIb), the inverter charged at ~93A while program 11 was 30A, so the MCB lockout, not program 11,
+is what protects the breaker.
 
 ## PV2 estimation
 

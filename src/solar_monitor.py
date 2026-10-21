@@ -62,7 +62,7 @@ class SolarMonitor:
 
         self.inverter = DaxtromnInverter(settings.INVERTER_PORT, settings.INVERTER_BAUD, settings.INVERTER_STALE_SECONDS)
         self.can_battery = CanBattery(settings.CAN_INTERFACE, settings.CAN_BATTERY_STALE_SECONDS)
-        self.grid_limiter = GridLimiter(settings.MCB_RATING_A, settings.MCB_LOCKOUT_SECONDS)
+        self.grid_limiter = GridLimiter(settings.MCB_RATING_A, settings.MCB_LOCKOUT_STEPS_SECONDS)
         self.inverter_alarm = Alarm("inverter-silent", settings.ALARM_REPEAT_SECONDS)
         self.failsafe_alarm = Alarm("npe-failsafe-blind", settings.ALARM_REPEAT_SECONDS)
 
@@ -81,8 +81,6 @@ class SolarMonitor:
         self.discovery = HomeAssistantDiscovery(self.client)
         self._initialize_state()
 
-        self._applied_ac_charge_current_a = None
-
     def _initialize_state(self):
         self._bms_was_online = None
         self._bms_offline_no_solar_since = None
@@ -92,6 +90,8 @@ class SolarMonitor:
         self.output_priority_fault = False
         self.last_applied_charger_source = None
         self.actual_voltage_thresholds = None
+        self.actual_utility_charging_current_a = None
+        self._requested_utility_charging_current_a = None
 
         self.pv_efficiency = settings.PV_EFFICIENCY_DEFAULT
         self.pv2_pv1_ratio = settings.PV2_PV1_RATIO_DEFAULT
@@ -113,6 +113,7 @@ class SolarMonitor:
             settings.BACK_TO_GRID_V_TOPIC: self._handle_back_to_grid_v,
             settings.BACK_TO_BATTERY_V_TOPIC: self._handle_back_to_battery_v,
             settings.MCB_RATING_TOPIC: self._handle_mcb_rating,
+            settings.MAX_UTILITY_CHARGING_CURRENT_TOPIC: self._handle_max_utility_charging_current,
         }
         self._source_mtimes = self._snapshot_source_mtimes()
 
@@ -298,9 +299,18 @@ class SolarMonitor:
         minimum, maximum = settings.MCB_RATING_RANGE
         if minimum <= value <= maximum:
             self.grid_limiter.mcb_rating_a = value
-            self._applied_ac_charge_current_a = None
             print(f"MCB rating set to {value}A", flush=True)
             self._save_soc_settings()
+
+    def _handle_max_utility_charging_current(self, payload):
+        if not is_number(payload):
+            return
+        value = int(float(payload))
+        if value not in settings.MAX_UTILITY_CHARGING_CURRENT_OPTIONS_A:
+            print(f"rejected max utility charging current {value}A: not a program 11 option", flush=True)
+            return
+        # applied from the main loop, which owns the serial port
+        self._requested_utility_charging_current_a = value
 
     def _desired_voltage_thresholds(self):
         # SBU only leaves the battery below program 12, so low battery protection raises 12 to its maximum
@@ -322,13 +332,17 @@ class SolarMonitor:
             print(f"program {program}: {desired[threshold_index]}V", flush=True)
         self.actual_voltage_thresholds = desired
 
-    def _apply_max_ac_charge_current(self):
-        desired_amps = self.grid_limiter.mcb_rating_a
-        if self._applied_ac_charge_current_a == desired_amps:
+    def _apply_max_utility_charging_current(self):
+        requested_amps = self._requested_utility_charging_current_a
+        if requested_amps is None:
             return
-        if self.inverter.set_max_ac_charge_current(desired_amps):
-            self._applied_ac_charge_current_a = desired_amps
-            print(f"max AC charge current: {desired_amps}A", flush=True)
+        # one attempt per request: a rejected value is logged once, not retried every cycle
+        self._requested_utility_charging_current_a = None
+        if requested_amps == self.actual_utility_charging_current_a:
+            return
+        if self.inverter.set_max_ac_charge_current(requested_amps):
+            self.actual_utility_charging_current_a = requested_amps
+            print(f"program 11: max utility charging current {requested_amps}A", flush=True)
 
     def _connect_mqtt(self):
         self.client.username_pw_set(settings.MQTT_USER, settings.MQTT_PASSWORD)
@@ -354,10 +368,8 @@ class SolarMonitor:
             self.last_applied_charger_source = initial_charger_source
             print(f"initial charger source: {initial_charger_source}", flush=True)
 
-        initial_ac_charge_current = self.inverter.query_max_ac_charge_current()
-        if initial_ac_charge_current is not None:
-            self._applied_ac_charge_current_a = initial_ac_charge_current
-            print(f"initial max AC charge current: {initial_ac_charge_current}A", flush=True)
+        self.actual_utility_charging_current_a = self.inverter.query_max_ac_charge_current()
+        print(f"initial program 11 max utility charging current: {self.actual_utility_charging_current_a}A", flush=True)
 
     def run(self):
         self._connect_mqtt()
@@ -378,9 +390,9 @@ class SolarMonitor:
 
     def _run_cycle(self, now):
         zmai_online, grid_power_for_npe, grid_power_for_pv2 = self._publish_grid_readings(now)
-        grid_current_for_limiter = self.zmai_meter.current_a if zmai_online and self.zmai_meter.current_a is not None else None
-        self.grid_limiter.update(grid_current_for_limiter, now)
         inverter_data = self.inverter.poll(now)
+        grid_current_for_limiter = self.zmai_meter.current_a if zmai_online and self.zmai_meter.current_a is not None else None
+        self.grid_limiter.update(grid_current_for_limiter, self._is_grid_charging(inverter_data), now)
         battery_power_w = None
         pv_total_power_w = 0
 
@@ -402,7 +414,7 @@ class SolarMonitor:
             self._apply_battery_mode(estimated_soc, battery_present, bms_available)
         if inverter_data is not None:
             self._apply_voltage_thresholds()
-            self._apply_max_ac_charge_current()
+            self._apply_max_utility_charging_current()
         self._verify_inverter_mode(estimated_soc, battery_present, now)
         ac_input_voltage_v = inverter_data.get("ac_input_voltage_v") if inverter_data is not None else None
         inverter_online = self.inverter.has_recent_data(now)
@@ -429,9 +441,15 @@ class SolarMonitor:
     def _publish_inverter_fields(self, inverter_data):
         for field_name, field_value in inverter_data.items():
             self.client.publish(f"{settings.BASE_TOPIC}/inverter/{field_name}", field_value)
+        self.client.publish(f"{settings.BASE_TOPIC}/grid_charging/active",
+                            "ON" if self._is_grid_charging(inverter_data) else "OFF")
+
+    @staticmethod
+    def _is_grid_charging(inverter_data):
+        if inverter_data is None:
+            return False
         device_status = inverter_data.get("device_status", "00000000")
-        ac_charging = len(device_status) > 7 and device_status[7] == "1"
-        self.client.publish(f"{settings.BASE_TOPIC}/grid_charging/active", "ON" if ac_charging else "OFF")
+        return len(device_status) > 7 and device_status[7] == "1"
 
     def _compute_battery_power(self, inverter_data, now):
         required_fields = ("battery_voltage_v", "battery_charging_current_a", "battery_discharge_current_a")
@@ -487,10 +505,7 @@ class SolarMonitor:
         pv1_power_w = inverter_data["pv1_power_w"]
 
         if grid_power_w is not None:
-            device_status = inverter_data.get("device_status", "00000000")
-            ac_charging_from_grid = len(device_status) > 7 and device_status[7] == "1"
-
-            if ac_charging_from_grid:
+            if self._is_grid_charging(inverter_data):
                 return self._pv_total_from_ratio(pv1_power_w)
 
             total_pv_w = (ac_output_w - grid_power_w) / self.pv_efficiency - battery_contribution_w
@@ -628,6 +643,12 @@ class SolarMonitor:
                       f"expected {self.last_applied_charger_source}", flush=True)
             self.last_applied_charger_source = actual_charger
 
+        actual_utility_charging_current_a = self.inverter.query_max_ac_charge_current()
+        if actual_utility_charging_current_a is not None:
+            if actual_utility_charging_current_a != self.actual_utility_charging_current_a:
+                print(f"mode verify: inverter program 11 is {actual_utility_charging_current_a}A", flush=True)
+            self.actual_utility_charging_current_a = actual_utility_charging_current_a
+
     def _apply_battery_mode(self, estimated_soc, battery_present, bms_available):
         inverter_capacity_pct = None
 
@@ -649,7 +670,9 @@ class SolarMonitor:
 
         if self._bms_offline_fallback_active:
             effective_charger = "solar_and_utility"
-        if self.grid_limiter.is_locked_out and effective_charger in ("utility_first", "solar_and_utility"):
+        if effective_charger not in settings.GRID_CHARGING_SOURCES:
+            self.grid_limiter.reset_repeats()
+        if self.grid_limiter.is_locked_out and effective_charger in settings.GRID_CHARGING_SOURCES:
             effective_charger = "solar_only"
         if effective_charger == self.last_applied_charger_source:
             return
@@ -673,8 +696,13 @@ class SolarMonitor:
                             "ON" if self._bms_offline_fallback_active else "OFF")
         self.client.publish(f"{settings.BASE_TOPIC}/grid_limiter/mcb_lockout",
                             "ON" if self.grid_limiter.is_locked_out else "OFF")
+        self.client.publish(f"{settings.BASE_TOPIC}/grid_limiter/over_rating",
+                            "ON" if self.grid_limiter.is_over_rating else "OFF")
         self.client.publish(f"{settings.BASE_TOPIC}/grid_limiter/mcb_rating_a/state",
                             self.grid_limiter.mcb_rating_a)
+        if self.actual_utility_charging_current_a is not None:
+            self.client.publish(f"{settings.BASE_TOPIC}/inverter/max_utility_charging_current_a/state",
+                                self.actual_utility_charging_current_a)
 
         self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state",
                             self.battery_mode.low_battery_protection_soc_pct)

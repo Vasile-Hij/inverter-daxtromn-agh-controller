@@ -77,12 +77,16 @@ BINARY_SENSORS = [
     ("pi_undervoltage", "RPi Undervoltage", f"{settings.BASE_TOPIC}/pi/undervoltage", "ON", "OFF", "problem"),
     ("grid_charging_active", "Grid Charging Active", f"{settings.BASE_TOPIC}/grid_charging/active", "ON", "OFF", None),
     ("grid_mcb_lockout", "Grid MCB Lockout", f"{settings.BASE_TOPIC}/grid_limiter/mcb_lockout", "ON", "OFF", "problem"),
+    ("grid_over_mcb_rating", "Grid Over MCB Rating", f"{settings.BASE_TOPIC}/grid_limiter/over_rating", "ON", "OFF", "problem"),
 ]
 
 # (object_id, name, state_topic, command_topic, options)
 SELECTS = [
     ("npe_mode", "N-PE Bonding Mode", f"{settings.BASE_TOPIC}/npe_bonding/mode/state", settings.NPE_MODE_TOPIC, settings.NPE_MODES),
     ("battery_mode", "Battery Mode", f"{settings.BASE_TOPIC}/battery_mode/state", settings.BATTERY_MODE_TOPIC, BATTERY_MODES),
+    ("max_utility_charging_current", "Max Utility Charging Current A (prog 11)",
+     f"{settings.BASE_TOPIC}/inverter/max_utility_charging_current_a/state", settings.MAX_UTILITY_CHARGING_CURRENT_TOPIC,
+     [str(amps) for amps in settings.MAX_UTILITY_CHARGING_CURRENT_OPTIONS_A]),
 ]
 
 # (object_id, name, state_topic, command_topic, minimum, maximum, step, unit)
@@ -113,6 +117,8 @@ class HomeAssistantDiscovery:
         ("number", "max_grid_power"),
         ("number", "max_grid_power_kw"),
         ("binary_sensor", "grid_limiter_throttled"),
+        ("number", "max_grid_current"),
+        ("number", "max_ac_charge_current"),
     ]
 
     def publish_all(self):

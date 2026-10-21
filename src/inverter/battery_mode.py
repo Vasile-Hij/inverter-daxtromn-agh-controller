@@ -1,4 +1,9 @@
-"""Battery charging mode: auto (Low Battery Protection + Grid Stop Charging) or manual (Grid Quick Charge).
+"""Battery charging mode, selected from Home Assistant:
+
+- auto: Low Battery Protection + Grid Stop Charging, decided from SOC
+- solar_only: never charges from grid, even when the battery is low
+- solar_and_grid: always charges from solar and grid together, no SOC stop
+- grid_quick_charge: charges from solar and grid up to Grid Quick Charge SOC, then solar only
 
 Output priority stays SBU, set once on the LCD: POP02 is blocked by firmware for LIb batteries,
 so any POP01 (SUB) the software sent could never be undone. With no usable battery, SBU already
@@ -6,8 +11,9 @@ runs the load from the grid. Software controls the charger source (PCP commands)
 low battery protection moves the load to grid through programs 12/13 (hold_load_on_grid).
 """
 
-BATTERY_MODES = ("auto", "manual")
+BATTERY_MODES = ("auto", "solar_only", "solar_and_grid", "grid_quick_charge")
 BATTERY_MODE_DEFAULT = "auto"
+FIXED_CHARGER_MODES = ("solar_only", "solar_and_grid")
 
 STATE_SETTINGS = {
     "auto_normal": {
@@ -28,14 +34,26 @@ STATE_SETTINGS = {
         "charger_source": "solar_and_utility",
         "hold_load_on_grid": False,
     },
-    "manual_grid_charging": {
-        "description": "manual: grid quick charge",
+    "solar_only": {
+        "description": "solar only",
+        "output_priority": "SBU",
+        "charger_source": "solar_only",
+        "hold_load_on_grid": False,
+    },
+    "solar_and_grid": {
+        "description": "solar and grid",
         "output_priority": "SBU",
         "charger_source": "solar_and_utility",
         "hold_load_on_grid": False,
     },
-    "manual_charged": {
-        "description": "manual: charged, holding",
+    "grid_quick_charge_charging": {
+        "description": "grid quick charge",
+        "output_priority": "SBU",
+        "charger_source": "solar_and_utility",
+        "hold_load_on_grid": False,
+    },
+    "grid_quick_charge_charged": {
+        "description": "grid quick charge: charged, holding",
         "output_priority": "SBU",
         "charger_source": "solar_only",
         "hold_load_on_grid": False,
@@ -64,10 +82,12 @@ class BatteryMode:
 
     @property
     def state(self):
-        if self.selected_mode == "manual":
+        if self.selected_mode in FIXED_CHARGER_MODES:
+            return self.selected_mode
+        if self.selected_mode == "grid_quick_charge":
             if self._grid_quick_charge_complete:
-                return "manual_charged"
-            return "manual_grid_charging"
+                return "grid_quick_charge_charged"
+            return "grid_quick_charge_charging"
         if self._no_battery_active:
             return "auto_no_battery"
         if self._low_battery_active:
@@ -114,11 +134,13 @@ class BatteryMode:
         return True
 
     def update(self, estimated_soc_pct, battery_present, inverter_capacity_pct=None, bms_available=False):
-        if self.selected_mode == "manual":
-            return self._update_manual(estimated_soc_pct)
+        if self.selected_mode in FIXED_CHARGER_MODES:
+            return None
+        if self.selected_mode == "grid_quick_charge":
+            return self._update_grid_quick_charge(estimated_soc_pct)
         return self._update_auto(estimated_soc_pct, battery_present, inverter_capacity_pct, bms_available)
 
-    def _update_manual(self, estimated_soc_pct):
+    def _update_grid_quick_charge(self, estimated_soc_pct):
         if self._grid_quick_charge_complete:
             return None
         if estimated_soc_pct < self.grid_quick_charge_soc_pct:

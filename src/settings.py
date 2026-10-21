@@ -41,7 +41,11 @@ BACK_TO_BATTERY_MINIMUM_GAP_V = 2.0
 
 MCB_RATING_A = 32
 MCB_RATING_RANGE = (16, 160)
-MCB_LOCKOUT_SECONDS = 1800
+# Repeated MCB lockouts last longer each time; after the last step grid charging stays off until midnight.
+MCB_LOCKOUT_STEPS_SECONDS = (1800, 3600, 7200)
+
+# LCD program 11: max utility (grid) charging current, battery side DC amps; 150/160A exist on the 10.2kW model only.
+MAX_UTILITY_CHARGING_CURRENT_OPTIONS_A = (2, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160)
 
 POLL_INTERVAL_SECONDS = 5
 
@@ -68,6 +72,8 @@ GRID_QUICK_CHARGE_SOC_TOPIC = f"{BASE_TOPIC}/battery/grid_quick_charge_soc/set"
 BACK_TO_GRID_V_TOPIC = f"{BASE_TOPIC}/battery/back_to_grid_v/set"
 BACK_TO_BATTERY_V_TOPIC = f"{BASE_TOPIC}/battery/back_to_battery_v/set"
 MCB_RATING_TOPIC = f"{BASE_TOPIC}/grid_limiter/mcb_rating_a/set"
+# topic name kept from the former number entity: the mosquitto bridge already forwards it in
+MAX_UTILITY_CHARGING_CURRENT_TOPIC = f"{BASE_TOPIC}/inverter/max_ac_charge_current_a/set"
 
 CAN_INTERFACE = "can0"
 CAN_BATTERY_STALE_SECONDS = 30
@@ -78,3 +84,5 @@ CHARGER_SOURCE_TO_PCP = {
     "solar_and_utility": "PCP02",
     "solar_only": "PCP03",
 }
+# solar_first included: on this inverter it grid-charges even while PV is producing
+GRID_CHARGING_SOURCES = ("utility_first", "solar_first", "solar_and_utility")
