@@ -3,6 +3,8 @@ import time
 
 import serial
 
+CRC_RESERVED_BYTES = (0x28, 0x0D, 0x0A)
+
 
 def is_number(text):
     stripped = text.strip()
@@ -39,9 +41,15 @@ class PI30Connection:
     def build_command(cls, command_text):
         command_bytes = command_text.encode("ascii")
         crc = cls.compute_crc(command_bytes)
-        crc_high = (crc >> 8) & 0xFF
-        crc_low = crc & 0xFF
-        return command_bytes + bytes([crc_high, crc_low]) + b"\r"
+        crc_bytes = [cls._escape_crc_byte((crc >> 8) & 0xFF), cls._escape_crc_byte(crc & 0xFF)]
+        return command_bytes + bytes(crc_bytes) + b"\r"
+
+    @staticmethod
+    def _escape_crc_byte(crc_byte):
+        # PI30: a CRC byte equal to "(", CR or LF would cut the frame short (POP02 ends in LF), so it is sent +1
+        if crc_byte in CRC_RESERVED_BYTES:
+            return crc_byte + 1
+        return crc_byte
 
     def send_raw_command(self, raw_command):
         if not os.path.exists(self._port):

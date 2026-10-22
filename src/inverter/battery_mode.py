@@ -1,120 +1,73 @@
-"""Battery charging mode, selected from Home Assistant:
+"""Battery modes, selected from Home Assistant. Battery mode is the global trigger: every state sets
+output priority, charger source, the program 12/13 hold and whether program 11 grid-charges.
 
-- auto: Low Battery Protection + Grid Stop Charging, decided from SOC
-- solar_only: never charges from grid, even when the battery is low
-- solar_and_grid: always charges from solar and grid together, no SOC stop
-- grid_quick_charge: charges from solar and grid up to Grid Quick Charge SOC, then solar only
-- eco: like auto, but never charges from grid: at Low Battery Protection the load moves to grid,
-  the battery rests and only solar charges it, until Grid Stop Charging SOC hands the load back
+- normal: house on battery (SBU); at Low Battery Protection SOC the house moves to grid (SUB) and
+  grid-charges up to Grid Stop Charging SOC, then back to battery
+- economy: never grid-charges; at Low Battery Protection SOC the house moves to grid and the battery
+  rests until PV covers the house consumption, then back to battery
+- quick_grid: house on grid, grid-charging whenever SOC is below Grid Quick Charge SOC; at the target
+  the house runs on battery with solar only, and grid charging resumes QUICK_GRID_RESUME_MARGIN_PCT below
 
-Output priority stays SBU, set once on the LCD: POP02 is blocked by firmware for LIb batteries,
-so any POP01 (SUB) the software sent could never be undone. With no usable battery, SBU already
-runs the load from the grid. Software controls the charger source (PCP commands), and in
-low battery protection moves the load to grid through programs 12/13 (hold_load_on_grid).
+Under SBU the inverter leaves the battery only below program 12 (51V maximum), where a LiFePO4 pack still
+rests at about 10%, and in battery mode it never grid-charges, so every on-grid state uses SUB (POP01).
+Charger source codes are named by live-tested behaviour: grid_charging (PCP01, follows program 11) and
+no_grid_charging (PCP02); see settings.CHARGER_SOURCE_TO_PCP.
 """
 
-BATTERY_MODES = ("auto", "solar_only", "solar_and_grid", "grid_quick_charge", "eco")
-BATTERY_MODE_DEFAULT = "auto"
-FIXED_CHARGER_MODES = ("solar_only", "solar_and_grid")
-# modes that follow SOC: low battery protection, then release at Grid Stop Charging
-SOC_PROTECTED_MODES = ("auto", "eco")
+BATTERY_MODES = ("normal", "economy", "quick_grid")
+BATTERY_MODE_DEFAULT = "normal"
+
+ON_BATTERY_GRID_READY = {"output_priority": "SBU", "charger_source": "grid_charging",
+                          "hold_load_on_grid": False, "grid_charging": False}
+ON_BATTERY_SOLAR_ONLY = {"output_priority": "SBU", "charger_source": "no_grid_charging",
+                         "hold_load_on_grid": False, "grid_charging": False}
+ON_GRID_CHARGING = {"output_priority": "SUB", "charger_source": "grid_charging",
+                    "hold_load_on_grid": True, "grid_charging": True}
+ON_GRID_RESTING = {"output_priority": "SUB", "charger_source": "no_grid_charging",
+                   "hold_load_on_grid": True, "grid_charging": False}
 
 STATE_SETTINGS = {
-    "auto_normal": {
-        "description": "auto: normal",
-        "output_priority": "SBU",
-        "charger_source": "solar_only",
-        "hold_load_on_grid": False,
-    },
-    "auto_low_battery": {
-        "description": "auto: low battery protection",
-        "output_priority": "SBU",
-        "charger_source": "solar_first",
-        "hold_load_on_grid": True,
-    },
-    "auto_no_battery": {
-        "description": "auto: no battery",
-        "output_priority": "SBU",
-        "charger_source": "solar_and_utility",
-        "hold_load_on_grid": False,
-    },
-    "solar_only": {
-        "description": "solar only",
-        "output_priority": "SBU",
-        "charger_source": "solar_only",
-        "hold_load_on_grid": False,
-    },
-    "solar_and_grid": {
-        "description": "solar and grid",
-        "output_priority": "SBU",
-        "charger_source": "solar_and_utility",
-        "hold_load_on_grid": False,
-    },
-    "grid_quick_charge_charging": {
-        "description": "grid quick charge",
-        "output_priority": "SBU",
-        "charger_source": "solar_and_utility",
-        "hold_load_on_grid": False,
-    },
-    "grid_quick_charge_charged": {
-        "description": "grid quick charge: charged, holding",
-        "output_priority": "SBU",
-        "charger_source": "solar_only",
-        "hold_load_on_grid": False,
-    },
-    "eco_normal": {
-        "description": "eco: normal",
-        "output_priority": "SBU",
-        "charger_source": "solar_only",
-        "hold_load_on_grid": False,
-    },
-    "eco_low_battery": {
-        "description": "eco: low battery, house on grid, battery resting",
-        "output_priority": "SBU",
-        "charger_source": "solar_only",
-        "hold_load_on_grid": True,
-    },
-    "eco_no_battery": {
-        "description": "eco: no battery, house on grid",
-        "output_priority": "SBU",
-        "charger_source": "solar_only",
-        "hold_load_on_grid": True,
-    },
+    "normal_battery": {"description": "normal: house on battery", **ON_BATTERY_GRID_READY},
+    "normal_grid": {"description": "normal: low battery, house on grid, grid charging", **ON_GRID_CHARGING},
+    "economy_battery": {"description": "economy: house on battery", **ON_BATTERY_SOLAR_ONLY},
+    "economy_grid": {"description": "economy: low battery, house on grid, battery resting", **ON_GRID_RESTING},
+    "quick_grid_grid": {"description": "quick grid: house on grid, grid charging", **ON_GRID_CHARGING},
+    "quick_grid_battery": {"description": "quick grid: charged, house on battery", **ON_BATTERY_SOLAR_ONLY},
+    "no_battery": {"description": "no battery, house on grid", **ON_GRID_RESTING},
 }
-
 
 INVERTER_CAPACITY_STOP_MARGIN_PCT = 10
 NO_BATTERY_CONFIRM_CYCLES = 12
+# PV must cover (or stop covering) the house this many cycles (about a minute) before economy moves the house
+PV_SURPLUS_CONFIRM_CYCLES = 12
+QUICK_GRID_RESUME_MARGIN_PCT = 5
 
 
 class BatteryMode:
-    """Chooses output priority and charger source from the selected mode and battery SOC."""
+    """Chooses output priority, charger source and grid holds from the selected mode, SOC and PV surplus."""
 
     def __init__(self, low_battery_protection_soc_pct, grid_stop_charging_soc_pct, grid_quick_charge_soc_pct):
         self.selected_mode = BATTERY_MODE_DEFAULT
         self.low_battery_protection_soc_pct = low_battery_protection_soc_pct
         self.grid_stop_charging_soc_pct = grid_stop_charging_soc_pct
         self.grid_quick_charge_soc_pct = grid_quick_charge_soc_pct
-        self._low_battery_active = False
+        self._on_grid = False
+        self._quick_grid_target_reached = False
         self._no_battery_active = False
         self._battery_absent_cycles = 0
         self._battery_present_cycles = 0
-        self._grid_quick_charge_complete = False
+        self._pv_surplus = False
+        self._pv_surplus_change_cycles = 0
         self._first_update_done = False
+        self._last_decision_inputs = None
 
     @property
     def state(self):
-        if self.selected_mode in FIXED_CHARGER_MODES:
-            return self.selected_mode
-        if self.selected_mode == "grid_quick_charge":
-            if self._grid_quick_charge_complete:
-                return "grid_quick_charge_charged"
-            return "grid_quick_charge_charging"
         if self._no_battery_active:
-            return f"{self.selected_mode}_no_battery"
-        if self._low_battery_active:
-            return f"{self.selected_mode}_low_battery"
-        return f"{self.selected_mode}_normal"
+            return "no_battery"
+        if self._on_grid:
+            return f"{self.selected_mode}_grid"
+        return f"{self.selected_mode}_battery"
 
     @property
     def desired_output_priority(self):
@@ -129,6 +82,10 @@ class BatteryMode:
         return STATE_SETTINGS[self.state]["hold_load_on_grid"]
 
     @property
+    def is_grid_charging_wanted(self):
+        return STATE_SETTINGS[self.state]["grid_charging"]
+
+    @property
     def status_description(self):
         state_settings = STATE_SETTINGS[self.state]
         return (f"{state_settings['description']} "
@@ -136,11 +93,11 @@ class BatteryMode:
 
     @property
     def never_charges_from_grid(self):
-        return self.selected_mode == "eco"
+        return self.selected_mode == "economy"
 
     @property
     def is_low_battery_active(self):
-        return self._low_battery_active
+        return self._on_grid and self.selected_mode != "quick_grid"
 
     @property
     def is_no_battery_active(self):
@@ -149,36 +106,67 @@ class BatteryMode:
     def select(self, mode_name):
         if mode_name not in BATTERY_MODES:
             return False
-        if mode_name in SOC_PROTECTED_MODES and mode_name == self.selected_mode:
+        if mode_name == self.selected_mode:
             return True
         self.selected_mode = mode_name
-        self._low_battery_active = False
-        self._no_battery_active = False
-        self._battery_absent_cycles = 0
-        self._battery_present_cycles = 0
-        self._grid_quick_charge_complete = False
+        self._on_grid = False
+        self._quick_grid_target_reached = False
+        # decide the new mode's state now from the last reading, so the inverter never gets the old one for a cycle
+        if self._last_decision_inputs is not None and not self._no_battery_active:
+            self._on_grid = self._decide_on_grid(*self._last_decision_inputs)
         return True
 
-    def update(self, estimated_soc_pct, battery_present, inverter_capacity_pct=None, bms_available=False):
-        if self.selected_mode in FIXED_CHARGER_MODES:
-            return None
-        if self.selected_mode == "grid_quick_charge":
-            return self._update_grid_quick_charge(estimated_soc_pct)
-        return self._update_auto(estimated_soc_pct, battery_present, inverter_capacity_pct, bms_available)
+    def accept_inverter_protection(self):
+        if self.selected_mode != "quick_grid":
+            self._on_grid = True
 
-    def _update_grid_quick_charge(self, estimated_soc_pct):
-        if self._grid_quick_charge_complete:
+    def update(self, estimated_soc_pct, battery_present, inverter_capacity_pct=None, bms_available=False,
+               pv_power_w=0, load_power_w=0):
+        presence_change = self._update_battery_presence(battery_present, bms_available)
+        if presence_change is not None or self._no_battery_active or not battery_present:
+            return presence_change
+        self._update_pv_surplus(pv_power_w, load_power_w)
+        was_on_grid = self._on_grid
+        self._last_decision_inputs = (estimated_soc_pct, inverter_capacity_pct, bms_available)
+        self._on_grid = self._decide_on_grid(*self._last_decision_inputs)
+        if self._on_grid == was_on_grid:
             return None
-        if estimated_soc_pct < self.grid_quick_charge_soc_pct:
-            return None
-        self._grid_quick_charge_complete = True
-        return f"grid quick charge reached {estimated_soc_pct}%, now {self.status_description}"
+        return f"SOC {estimated_soc_pct}%, now {self.status_description}"
 
-    def _update_auto(self, estimated_soc_pct, battery_present, inverter_capacity_pct, bms_available):
+    def _decide_on_grid(self, estimated_soc_pct, inverter_capacity_pct, bms_available):
+        soc_is_low = self._is_soc_low(estimated_soc_pct, inverter_capacity_pct, bms_available)
+        if self.selected_mode == "normal":
+            if self._on_grid:
+                return estimated_soc_pct < self.grid_stop_charging_soc_pct
+            return soc_is_low
+        if self.selected_mode == "economy":
+            if self._on_grid:
+                return not self._pv_surplus
+            return soc_is_low and not self._pv_surplus
+        return self._decide_quick_grid_on_grid(estimated_soc_pct)
+
+    def _decide_quick_grid_on_grid(self, estimated_soc_pct):
+        if estimated_soc_pct >= self.grid_quick_charge_soc_pct:
+            self._quick_grid_target_reached = True
+            return False
+        if not self._quick_grid_target_reached or self._on_grid:
+            return True
+        return estimated_soc_pct <= self.grid_quick_charge_soc_pct - QUICK_GRID_RESUME_MARGIN_PCT
+
+    def _update_pv_surplus(self, pv_power_w, load_power_w):
+        surplus_now = pv_power_w > load_power_w
+        if surplus_now == self._pv_surplus:
+            self._pv_surplus_change_cycles = 0
+            return
+        self._pv_surplus_change_cycles += 1
+        if self._pv_surplus_change_cycles >= PV_SURPLUS_CONFIRM_CYCLES:
+            self._pv_surplus = surplus_now
+            self._pv_surplus_change_cycles = 0
+
+    def _update_battery_presence(self, battery_present, bms_available):
         # Decide immediately on the first reading after start; debounce only later changes.
         confirm_cycles = NO_BATTERY_CONFIRM_CYCLES if self._first_update_done else 1
         self._first_update_done = True
-
         if not battery_present and not bms_available:
             self._battery_absent_cycles += 1
             self._battery_present_cycles = 0
@@ -186,29 +174,15 @@ class BatteryMode:
                 return None
             self._no_battery_active = True
             return f"no battery detected, now {self.status_description}"
-
         self._battery_absent_cycles = 0
-        if self._no_battery_active:
-            self._battery_present_cycles += 1
-            if self._battery_present_cycles < NO_BATTERY_CONFIRM_CYCLES:
-                return None
-            self._no_battery_active = False
-            # A battery that vanished is usually a BMS cutoff on a deep discharge: grid-charge it until recovered.
-            self._low_battery_active = estimated_soc_pct < self.grid_stop_charging_soc_pct
-            return f"battery returned, now {self.status_description}"
-
-        if not battery_present:
+        if not self._no_battery_active:
             return None
-
-        if not self._low_battery_active and self._is_soc_low(estimated_soc_pct, inverter_capacity_pct, bms_available):
-            self._low_battery_active = True
-            return f"low battery ({estimated_soc_pct}%), now {self.status_description}"
-
-        if self._low_battery_active and estimated_soc_pct >= self.grid_stop_charging_soc_pct:
-            self._low_battery_active = False
-            return f"battery recovered ({estimated_soc_pct}%), now {self.status_description}"
-
-        return None
+        self._battery_present_cycles += 1
+        if self._battery_present_cycles < NO_BATTERY_CONFIRM_CYCLES:
+            return None
+        self._no_battery_active = False
+        self._on_grid = False
+        return f"battery returned, now {self.status_description}"
 
     def _is_soc_low(self, estimated_soc_pct, inverter_capacity_pct, bms_available):
         if bms_available:
@@ -216,10 +190,3 @@ class BatteryMode:
         inverter_stop_threshold = self.low_battery_protection_soc_pct + INVERTER_CAPACITY_STOP_MARGIN_PCT
         return (inverter_capacity_pct is not None
                 and inverter_capacity_pct <= inverter_stop_threshold)
-
-    def accept_inverter_protection(self):
-        if self.selected_mode in SOC_PROTECTED_MODES:
-            self._low_battery_active = True
-
-    def clear_low_battery(self):
-        self._low_battery_active = False

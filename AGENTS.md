@@ -35,11 +35,18 @@
   or obfuscated names
 - modular code: one focused module per concern, files under 500 lines of code
 - functions ideally under 20 lines; extract helpers when they grow past that
+- every new feature or fix must be live tested on the running system before its PR: deploy it,
+  exercise the option from HA, and confirm the inverter/BMS/ZMAi telemetry actually changes as
+  intended (e.g. charging current rises); unit tests alone are not enough
+- testing order: synthetic (unit) test first, then a real test on the inverter: apply each option or
+  battery mode in turn and watch it for 5, 10 and 20 seconds (charging current, BMS current, ZMAi
+  grid power, device status) before moving to the next one
 - module map: settings.py (constants, thresholds, MQTT topics, env credentials),
   home_assistant.py (HA MQTT discovery), battery.py (SOC estimation),
   inverter.py (Daxtromn/PI30 polling and commands), pi30.py (PI30 serial base),
-  npe_bonding.py (relay decision + GPIO), zmai_meter.py (grid meter MQTT state),
-  discharge_guard.py (output priority guard), alarm.py (fault logging),
+  battery_mode.py (battery modes: output priority, charger, holds), voltage_thresholds.py (programs 12/13),
+  npe_bonding.py (relay decision + GPIO), npe_supervisor.py (N-PE thread, 1 s),
+  zmai_meter.py (grid meter MQTT state), alarm.py (fault logging),
   solar_monitor.py (main service loop only)
 
 **Infra**
