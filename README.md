@@ -9,7 +9,7 @@ Raspberry Pi 4 controller for a Daxtromn AGH 10.2kW inverter (2 MPPT), DAH 16S L
 
 ## Hardware
 
-It can work with or without Home Assistant! Some fields can be changed from HA: charging battery mode: auto (solar priority, grid only when the battery is low), solar only, solar and grid, grid quick charge (charge from grid in case a grid surge is scheduled and sun it is not enough to charge battery in full), eco (like auto, but never charges from grid: a low battery moves the house to grid and rests until solar recharges it). Also options for battery voltage or percentage of battery multiple-thresholds. 
+It can work with or without Home Assistant! Battery mode is picked from HA (normal, economy, quick grid, see Battery strategy); thresholds are HA numbers.
 
 | Device | Setup |
 |---|---|
@@ -22,30 +22,28 @@ It can work with or without Home Assistant! Some fields can be changed from HA: 
 
 ## Battery strategy
 
-Program 01 = **SBU**, set on the LCD (firmware NAKs POP02 over serial; the Pi never sends POP).
+Battery mode (HA select) is the global trigger: each state sets program 01 (output priority), 16 (charger source),
+12/13 and 11 together, and the HA boxes for 11/12/13 show what the mode runs.
 
-| Battery Mode (HA) | State | When | 16 (charger) |
-|---|---|---|---|
-| auto | Normal | default | OSO solar only |
-| auto | Low battery | SOC ≤ Low Battery Protection until Grid Stop Charging | CSO solar first |
-| auto | No battery | BMS cut off for 60s | SNU solar + grid |
-| solar_only | | always, even with a low battery | OSO solar only |
-| solar_and_grid | | always, no SOC stop | SNU solar + grid |
-| grid_quick_charge | | until Grid Quick Charge SOC | SNU, then OSO |
-| eco | Normal | default | OSO solar only |
-| eco | Low battery | SOC ≤ Low Battery Protection until Grid Stop Charging, house on grid | OSO solar only |
-| eco | No battery | BMS cut off for 60s, house on grid | OSO solar only |
-| any but eco | BMS offline fallback | no BMS + no solar 3h | SNU |
+| Battery mode | State | When | 01 | 16 | 12 / 13 | 11 |
+|---|---|---|---|---|---|---|
+| normal | house on battery | default | SBU | CSO | HA values | 2A |
+| normal | house on grid, grid charging | SOC ≤ Low Battery Protection until Grid Stop Charging | SUB | CSO | 51 / 58V | HA value |
+| economy | house on battery | default, or PV above house load for ~1 min | SBU | OSO | HA values | 2A |
+| economy | house on grid, battery resting | SOC ≤ Low Battery Protection and PV below house load | SUB | OSO | 51 / 58V | 2A |
+| quick_grid | house on grid, grid charging | SOC below Grid Quick Charge (after reaching it: 5% below) | SUB | CSO | 51 / 58V | HA value |
+| quick_grid | house on battery | SOC at Grid Quick Charge | SBU | OSO | HA values | 2A |
+| any | no battery | BMS cut off for 60s | SUB | OSO | 51 / 58V | 2A |
+| normal, quick_grid | BMS offline fallback | no BMS + no solar 3h | SUB | CSO | 51 / 58V | HA value |
 
-In solar_only the battery is not charged on cloudy days; the house stays powered because SBU moves the load to grid at program 12.
+Why SUB: under SBU the inverter leaves the battery only below program 12 (51V maximum), where this LiFePO4 still rests
+at ~10%, and in battery mode it never grid-charges. Why CSO: on this inverter only charger source CSO (PCP01)
+grid-charges; SNU (PCP02) did not charge in two live tests. POP02 used to be NAKed because its CRC ends in 0x0A; PI30
+CRC bytes 0x28/0x0D/0x0A are now sent +1, and the Pi switches SUB <-> SBU both ways.
 
-eco never grid-charges, so program 11 (utility charging current, minimum 2A) has no effect in it; solar charging is
-capped by program 02 only. At low battery it holds the load on grid through programs 12/13 like auto, with OSO, so the
-battery neither discharges nor takes grid current, and PV recharges it. In the BMS offline fallback eco keeps the
-load on grid but stays on OSO.
-
-Programs 12/13 (back to grid / back to battery): 49.0V / 52.0V. In SBU the inverter moves the load to grid below 49V (battery dies ~46V).
-Low battery raises them to 51.0V / 58.0V (both maximums): the load goes to grid once the battery is at or below 51V, and stays there until Grid Stop Charging SOC, when the HA values return.
+Programs 12/13 can be changed in HA only while the house is on battery: 12 within 46-51V (above the BMS cut-off),
+13 within 48-56V, at least 2V apart. N-PE runs in its own 1 s thread, so serial commands never delay bonding:
+live, N-PE bonded ~3s after a SUB -> SBU switch.
 
 All thresholds are HA numbers (retained MQTT + `soc_settings.json`). Every inverter setting is read back after sending and re-checked every 10 min.
 
@@ -70,7 +68,8 @@ MCB rating (A) is an HA number, persisted in `soc_settings.json`.
 ## Program 11 (max utility charging current)
 
 HA select with the values the inverter accepts (manual: 2, 10-140A, 150/160A on the 10.2kW model), in battery side DC amps.
-It shows the value read from the inverter (QPIRI), sends MUCHGC only when a new value is picked, and is re-read every 10 min.
+The picked value is the grid charging current: the battery mode applies it only in grid-charging states and runs 2A
+otherwise, sending MUCHGC when the wanted value changes. It is re-read every 10 min.
 It is independent of the MCB rating: 30A DC is about 1.6kW, roughly 7A on the grid side.
 Observed: with the BMS connected (LIb), the inverter charged at ~93A while program 11 was 30A, so the MCB lockout, not program 11,
 is what protects the breaker.

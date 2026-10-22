@@ -33,10 +33,12 @@ SOC_SETTINGS_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..
 GRID_QUICK_CHARGE_SOC_RANGE = (30, 100)
 # LCD program 12: SBU moves the load to grid below this voltage; must stay above where the BMS cuts out (~46V).
 BACK_TO_GRID_V = 49.0
-BACK_TO_GRID_V_RANGE = (44.0, 51.0)
-# LCD program 13: SBU moves the load back to battery above this voltage.
+BACK_TO_GRID_V_RANGE = (46.0, 51.0)
+# LCD program 13: SBU moves the load back to battery above this voltage and stops utility charging there.
 BACK_TO_BATTERY_V = 52.0
 BACK_TO_BATTERY_V_RANGE = (48.0, 58.0)
+# a user value above this (near the BMS charge limit, 57.6V) would keep the load on grid for good
+BACK_TO_BATTERY_NORMAL_MAXIMUM_V = 56.0
 BACK_TO_BATTERY_MINIMUM_GAP_V = 2.0
 
 MCB_RATING_A = 32
@@ -45,6 +47,8 @@ MCB_RATING_RANGE = (16, 160)
 MCB_LOCKOUT_STEPS_SECONDS = (1800, 3600, 7200)
 
 # LCD program 11: max utility (grid) charging current, battery side DC amps; 150/160A exist on the 10.2kW model only.
+# program 11 while a battery mode grid-charges; every other state runs the minimum option
+GRID_CHARGING_CURRENT_A = 30
 MAX_UTILITY_CHARGING_CURRENT_OPTIONS_A = (2, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160)
 
 POLL_INTERVAL_SECONDS = 5
@@ -77,6 +81,10 @@ MAX_UTILITY_CHARGING_CURRENT_TOPIC = f"{BASE_TOPIC}/inverter/max_ac_charge_curre
 
 CAN_INTERFACE = "can0"
 CAN_BATTERY_STALE_SECONDS = 30
+
+OUTPUT_PRIORITY_TO_POP = {"USB": "POP00", "SUB": "POP01", "SBU": "POP02"}
+# a refused output priority command is retried at most this often
+OUTPUT_PRIORITY_RETRY_SECONDS = 60
 
 CHARGER_SOURCE_TO_PCP = {
     "utility_first": "PCP00",

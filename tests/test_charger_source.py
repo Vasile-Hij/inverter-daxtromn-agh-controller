@@ -13,7 +13,7 @@ from inverter.battery_mode import BatteryMode
 from solar_monitor import SolarMonitor
 
 
-def make_monitor(selected_mode="auto"):
+def make_monitor(selected_mode="normal"):
     monitor = MagicMock(spec=SolarMonitor)
     monitor.battery_mode = BatteryMode(16, 55, 80)
     monitor.battery_mode.select(selected_mode)
@@ -40,8 +40,9 @@ class TestMcbLockoutOverridesMode:
         assert monitor.last_applied_charger_source == "solar_only"
         monitor.inverter.set_charger_source.assert_called_with("PCP03")
 
-    def test_lockout_stops_solar_and_grid_mode(self):
-        monitor = make_monitor("solar_and_grid")
+    def test_lockout_stops_quick_grid_mode(self):
+        monitor = make_monitor("quick_grid")
+        monitor.battery_mode.update(50, battery_present=True, bms_available=True)
         monitor.grid_limiter.update(35, True, 100)
         monitor._apply_charger_source()
         assert monitor.last_applied_charger_source == "solar_only"
@@ -76,23 +77,23 @@ class TestLockoutRepeatReset:
         assert monitor.grid_limiter.lockout_count == 1
 
 
-class TestEcoNeverChargesFromGrid:
+class TestEconomyNeverChargesFromGrid:
 
     def test_low_battery_stays_solar_only(self):
-        monitor = make_monitor("eco")
+        monitor = make_monitor("economy")
         enter_low_battery_protection(monitor)
         monitor._apply_charger_source()
         assert monitor.last_applied_charger_source == "solar_only"
         monitor.inverter.set_charger_source.assert_called_with("PCP03")
 
     def test_bms_offline_fallback_stays_solar_only(self):
-        monitor = make_monitor("eco")
+        monitor = make_monitor("economy")
         monitor._bms_offline_fallback_active = True
         monitor._apply_charger_source()
         assert monitor.last_applied_charger_source == "solar_only"
 
-    def test_bms_offline_fallback_still_grid_charges_in_auto(self):
-        monitor = make_monitor("auto")
+    def test_bms_offline_fallback_still_grid_charges_in_normal(self):
+        monitor = make_monitor("normal")
         monitor._bms_offline_fallback_active = True
         monitor._apply_charger_source()
-        assert monitor.last_applied_charger_source == "solar_and_utility"
+        assert monitor.last_applied_charger_source == "solar_first"
