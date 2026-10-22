@@ -32,33 +32,33 @@ def enter_low_battery_protection(monitor):
 
 class TestMcbLockoutOverridesMode:
 
-    def test_lockout_stops_solar_first_grid_charging(self):
+    def test_lockout_stops_grid_charging(self):
         monitor = make_monitor()
         enter_low_battery_protection(monitor)
         monitor.grid_limiter.update(35, True, 100)
         monitor._apply_charger_source()
-        assert monitor.last_applied_charger_source == "solar_only"
-        monitor.inverter.set_charger_source.assert_called_with("PCP03")
+        assert monitor.last_applied_charger_source == "no_grid_charging"
+        monitor.inverter.set_charger_source.assert_called_with("PCP02")
 
     def test_lockout_stops_quick_grid_mode(self):
         monitor = make_monitor("quick_grid")
         monitor.battery_mode.update(50, battery_present=True, bms_available=True)
         monitor.grid_limiter.update(35, True, 100)
         monitor._apply_charger_source()
-        assert monitor.last_applied_charger_source == "solar_only"
+        assert monitor.last_applied_charger_source == "no_grid_charging"
 
     def test_lockout_stops_bms_offline_fallback(self):
         monitor = make_monitor()
         monitor._bms_offline_fallback_active = True
         monitor.grid_limiter.update(35, True, 100)
         monitor._apply_charger_source()
-        assert monitor.last_applied_charger_source == "solar_only"
+        assert monitor.last_applied_charger_source == "no_grid_charging"
 
     def test_no_lockout_keeps_desired_grid_charging(self):
         monitor = make_monitor()
         enter_low_battery_protection(monitor)
         monitor._apply_charger_source()
-        assert monitor.last_applied_charger_source == "solar_first"
+        assert monitor.last_applied_charger_source == "grid_charging"
 
 
 class TestLockoutRepeatReset:
@@ -79,21 +79,21 @@ class TestLockoutRepeatReset:
 
 class TestEconomyNeverChargesFromGrid:
 
-    def test_low_battery_stays_solar_only(self):
+    def test_low_battery_stays_without_grid_charging(self):
         monitor = make_monitor("economy")
         enter_low_battery_protection(monitor)
         monitor._apply_charger_source()
-        assert monitor.last_applied_charger_source == "solar_only"
-        monitor.inverter.set_charger_source.assert_called_with("PCP03")
+        assert monitor.last_applied_charger_source == "no_grid_charging"
+        monitor.inverter.set_charger_source.assert_called_with("PCP02")
 
-    def test_bms_offline_fallback_stays_solar_only(self):
+    def test_bms_offline_fallback_stays_without_grid_charging(self):
         monitor = make_monitor("economy")
         monitor._bms_offline_fallback_active = True
         monitor._apply_charger_source()
-        assert monitor.last_applied_charger_source == "solar_only"
+        assert monitor.last_applied_charger_source == "no_grid_charging"
 
     def test_bms_offline_fallback_still_grid_charges_in_normal(self):
         monitor = make_monitor("normal")
         monitor._bms_offline_fallback_active = True
         monitor._apply_charger_source()
-        assert monitor.last_applied_charger_source == "solar_first"
+        assert monitor.last_applied_charger_source == "grid_charging"

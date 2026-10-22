@@ -10,23 +10,24 @@ output priority, charger source, the program 12/13 hold and whether program 11 g
 
 Under SBU the inverter leaves the battery only below program 12 (51V maximum), where a LiFePO4 pack still
 rests at about 10%, and in battery mode it never grid-charges, so every on-grid state uses SUB (POP01).
-On this inverter only charger source solar_first (PCP01) grid-charges; solar_and_utility (PCP02) does not.
+Charger source codes are named by live-tested behaviour: grid_charging (PCP01, follows program 11) and
+no_grid_charging (PCP02); see settings.CHARGER_SOURCE_TO_PCP.
 """
 
 BATTERY_MODES = ("normal", "economy", "quick_grid")
 BATTERY_MODE_DEFAULT = "normal"
 
-ON_BATTERY_SOLAR_FIRST = {"output_priority": "SBU", "charger_source": "solar_first",
+ON_BATTERY_GRID_READY = {"output_priority": "SBU", "charger_source": "grid_charging",
                           "hold_load_on_grid": False, "grid_charging": False}
-ON_BATTERY_SOLAR_ONLY = {"output_priority": "SBU", "charger_source": "solar_only",
+ON_BATTERY_SOLAR_ONLY = {"output_priority": "SBU", "charger_source": "no_grid_charging",
                          "hold_load_on_grid": False, "grid_charging": False}
-ON_GRID_CHARGING = {"output_priority": "SUB", "charger_source": "solar_first",
+ON_GRID_CHARGING = {"output_priority": "SUB", "charger_source": "grid_charging",
                     "hold_load_on_grid": True, "grid_charging": True}
-ON_GRID_RESTING = {"output_priority": "SUB", "charger_source": "solar_only",
+ON_GRID_RESTING = {"output_priority": "SUB", "charger_source": "no_grid_charging",
                    "hold_load_on_grid": True, "grid_charging": False}
 
 STATE_SETTINGS = {
-    "normal_battery": {"description": "normal: house on battery", **ON_BATTERY_SOLAR_FIRST},
+    "normal_battery": {"description": "normal: house on battery", **ON_BATTERY_GRID_READY},
     "normal_grid": {"description": "normal: low battery, house on grid, grid charging", **ON_GRID_CHARGING},
     "economy_battery": {"description": "economy: house on battery", **ON_BATTERY_SOLAR_ONLY},
     "economy_grid": {"description": "economy: low battery, house on grid, battery resting", **ON_GRID_RESTING},
@@ -58,6 +59,7 @@ class BatteryMode:
         self._pv_surplus = False
         self._pv_surplus_change_cycles = 0
         self._first_update_done = False
+        self._last_decision_inputs = None
 
     @property
     def state(self):
@@ -109,6 +111,9 @@ class BatteryMode:
         self.selected_mode = mode_name
         self._on_grid = False
         self._quick_grid_target_reached = False
+        # decide the new mode's state now from the last reading, so the inverter never gets the old one for a cycle
+        if self._last_decision_inputs is not None and not self._no_battery_active:
+            self._on_grid = self._decide_on_grid(*self._last_decision_inputs)
         return True
 
     def accept_inverter_protection(self):
@@ -122,7 +127,8 @@ class BatteryMode:
             return presence_change
         self._update_pv_surplus(pv_power_w, load_power_w)
         was_on_grid = self._on_grid
-        self._on_grid = self._decide_on_grid(estimated_soc_pct, inverter_capacity_pct, bms_available)
+        self._last_decision_inputs = (estimated_soc_pct, inverter_capacity_pct, bms_available)
+        self._on_grid = self._decide_on_grid(*self._last_decision_inputs)
         if self._on_grid == was_on_grid:
             return None
         return f"SOC {estimated_soc_pct}%, now {self.status_description}"

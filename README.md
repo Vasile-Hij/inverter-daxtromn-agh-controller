@@ -27,19 +27,28 @@ Battery mode (HA select) is the global trigger: each state sets program 01 (outp
 
 | Battery mode | State | When | 01 | 16 | 12 / 13 | 11 |
 |---|---|---|---|---|---|---|
-| normal | house on battery | default | SBU | CSO | HA values | 2A |
-| normal | house on grid, grid charging | SOC ≤ Low Battery Protection until Grid Stop Charging | SUB | CSO | 51 / 58V | Normal Grid Charging Current (50A ≈ 2.6kW) |
-| economy | house on battery | default, or PV above house load for ~1 min | SBU | OSO | HA values | 2A |
-| economy | house on grid, battery resting | SOC ≤ Low Battery Protection and PV below house load | SUB | OSO | 51 / 58V | 2A |
-| quick_grid | house on grid, grid charging | SOC below Grid Quick Charge (after reaching it: 5% below) | SUB | CSO | 51 / 58V | Quick Grid Charging Current (90A ≈ 4.7kW) |
-| quick_grid | house on battery | SOC at Grid Quick Charge | SBU | OSO | HA values | 2A |
-| any | no battery | BMS cut off for 60s | SUB | OSO | 51 / 58V | 2A |
-| normal, quick_grid | BMS offline fallback | no BMS + no solar 3h | SUB | CSO | 51 / 58V | Normal Grid Charging Current |
+| normal | house on battery | default | SBU | PCP01 | HA values | 2A |
+| normal | house on grid, grid charging | SOC ≤ Low Battery Protection until Grid Stop Charging | SUB | PCP01 | 51 / 58V | Normal Grid Charging Current (50A ≈ 2.6kW) |
+| economy | house on battery | default, or PV above house load for ~1 min | SBU | PCP02 | HA values | 2A |
+| economy | house on grid, battery resting | SOC ≤ Low Battery Protection and PV below house load | SUB | PCP02 | 51 / 58V | 2A |
+| quick_grid | house on grid, grid charging | SOC below Grid Quick Charge (after reaching it: 5% below) | SUB | PCP01 | 51 / 58V | Quick Grid Charging Current (90A ≈ 4.7kW) |
+| quick_grid | house on battery | SOC at Grid Quick Charge | SBU | PCP02 | HA values | 2A |
+| any | no battery | BMS cut off for 60s | SUB | PCP02 | 51 / 58V | 2A |
+| normal, quick_grid | BMS offline fallback | no BMS + no solar 3h | SUB | PCP01 | 51 / 58V | Normal Grid Charging Current |
 
 Why SUB: under SBU the inverter leaves the battery only below program 12 (51V maximum), where this LiFePO4 still rests
-at ~10%, and in battery mode it never grid-charges. Why CSO: on this inverter only charger source CSO (PCP01)
-grid-charges; SNU (PCP02) did not charge in two live tests. POP02 used to be NAKed because its CRC ends in 0x0A; PI30
-CRC bytes 0x28/0x0D/0x0A are now sent +1, and the Pi switches SUB <-> SBU both ways.
+at ~10%, and in battery mode it never grid-charges.
+
+Program 16 codes are named by what they did in live tests on this firmware, not by the manual (LCD names unconfirmed):
+
+| Code | Name in code | Live behaviour |
+|---|---|---|
+| PCP01 | grid_charging | grid-charges and follows program 11 (50A and 90A both confirmed) |
+| PCP02 | no_grid_charging | stops grid charging, PV still charges (grid fell by ~2kW, BMS current fell to the PV share) |
+| PCP03 | never sent | grid-charges ignoring program 11: 56A with program 11 at 2A |
+
+POP02 used to be NAKed because its CRC ends in 0x0A; PI30 CRC bytes 0x28/0x0D/0x0A are now sent +1, and the Pi
+switches SUB <-> SBU both ways.
 
 Programs 12/13 can be changed in HA only while the house is on battery: 12 within 46-51V (above the BMS cut-off),
 13 within 48-56V, at least 2V apart. N-PE runs in its own 1 s thread, so serial commands never delay bonding:
@@ -50,7 +59,8 @@ All thresholds are HA numbers (retained MQTT + `soc_settings.json`). Every inver
 ## Grid MCB lockout (32A protection)
 
 When grid current (ZMAi) reaches the MCB rating **while the inverter is charging from grid**, the charger is
-switched to solar only, whatever the Battery Mode (solar first included: this inverter grid-charges in CSO even with PV).
+switched to PCP02 (no grid charging), whatever the Battery Mode. Before 2026-10-22 it sent PCP03, which kept
+charging uncapped, so lockouts re-triggered as soon as they expired.
 
 | Lockout | Grid charging paused for |
 |---|---|

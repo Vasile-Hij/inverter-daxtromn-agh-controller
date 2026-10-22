@@ -27,7 +27,8 @@ class DaxtromnInverter(PI30Connection):
     QPIRI_BACK_TO_GRID_V_INDEX = 8
     QPIRI_BACK_TO_BATTERY_V_INDEX = 22
     OUTPUT_SOURCE_NAMES = {0: "USB", 1: "SUB", 2: "SBU"}
-    CHARGER_SOURCE_NAMES = {0: "utility_first", 1: "solar_first", 2: "solar_and_utility", 3: "solar_only"}
+    # named by live-tested behaviour, see settings.CHARGER_SOURCE_TO_PCP
+    CHARGER_SOURCE_NAMES = {0: "untested", 1: "grid_charging", 2: "no_grid_charging", 3: "uncapped_grid_charging"}
 
     QPIGS_CMD = b"QPIGS\xb7\xa9\r"
     QPIGS_FIELD_NAMES = [

@@ -643,7 +643,7 @@ class SolarMonitor:
             self._bms_offline_fallback_active = True
             self.battery_mode.accept_inverter_protection()
             print(f"WARNING: BMS offline and no solar charging for {int(elapsed / 3600)}h, "
-                  "forcing grid charging (SUB + solar_first)", flush=True)
+                  "forcing grid charging (SUB + grid_charging)", flush=True)
 
     def _verify_inverter_mode(self, estimated_soc, battery_present, now):
         if self._last_mode_verify_time is not None:
@@ -719,11 +719,11 @@ class SolarMonitor:
 
         # eco keeps the fallback's load on grid (low battery hold) but never grid-charges
         if self._bms_offline_fallback_active and not self.battery_mode.never_charges_from_grid:
-            effective_charger = "solar_first"
+            effective_charger = "grid_charging"
         if not self.battery_mode.is_grid_charging_wanted and not self._bms_offline_fallback_active:
             self.grid_limiter.reset_repeats()
         if self.grid_limiter.is_locked_out and effective_charger in settings.GRID_CHARGING_SOURCES:
-            effective_charger = "solar_only"
+            effective_charger = "no_grid_charging"
         if effective_charger == self.last_applied_charger_source:
             return
         pcp_command = settings.CHARGER_SOURCE_TO_PCP[effective_charger]

@@ -89,11 +89,11 @@ OUTPUT_PRIORITY_TO_POP = {"USB": "POP00", "SUB": "POP01", "SBU": "POP02"}
 # a refused output priority command is retried at most this often
 OUTPUT_PRIORITY_RETRY_SECONDS = 60
 
+# Program 16 codes named by what they did in live tests on this firmware (2026-10-22), not by the manual:
+# PCP01 grid-charges and follows program 11; PCP02 stops grid charging (PV still charges);
+# PCP03 grid-charges ignoring program 11 (56A with program 11 at 2A), so it is never sent.
 CHARGER_SOURCE_TO_PCP = {
-    "utility_first": "PCP00",
-    "solar_first": "PCP01",
-    "solar_and_utility": "PCP02",
-    "solar_only": "PCP03",
+    "grid_charging": "PCP01",
+    "no_grid_charging": "PCP02",
 }
-# solar_first included: on this inverter it grid-charges even while PV is producing
-GRID_CHARGING_SOURCES = ("utility_first", "solar_first", "solar_and_utility")
+GRID_CHARGING_SOURCES = ("grid_charging",)
