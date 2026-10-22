@@ -47,8 +47,9 @@ MCB_RATING_RANGE = (16, 160)
 MCB_LOCKOUT_STEPS_SECONDS = (1800, 3600, 7200)
 
 # LCD program 11: max utility (grid) charging current, battery side DC amps; 150/160A exist on the 10.2kW model only.
-# program 11 while a battery mode grid-charges; every other state runs the minimum option
-GRID_CHARGING_CURRENT_A = 30
+# program 11 (battery-side DC amps, ~52V) per grid-charging mode; every other state runs the minimum option
+NORMAL_GRID_CHARGING_CURRENT_A = 50  # ~2.6kW
+QUICK_GRID_CHARGING_CURRENT_A = 90  # ~4.7kW
 MAX_UTILITY_CHARGING_CURRENT_OPTIONS_A = (2, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130, 140, 150, 160)
 
 POLL_INTERVAL_SECONDS = 5
@@ -77,7 +78,9 @@ BACK_TO_GRID_V_TOPIC = f"{BASE_TOPIC}/battery/back_to_grid_v/set"
 BACK_TO_BATTERY_V_TOPIC = f"{BASE_TOPIC}/battery/back_to_battery_v/set"
 MCB_RATING_TOPIC = f"{BASE_TOPIC}/grid_limiter/mcb_rating_a/set"
 # topic name kept from the former number entity: the mosquitto bridge already forwards it in
-MAX_UTILITY_CHARGING_CURRENT_TOPIC = f"{BASE_TOPIC}/inverter/max_ac_charge_current_a/set"
+# the normal topic keeps the old program 11 path, already forwarded by the mosquitto bridge
+NORMAL_GRID_CHARGING_CURRENT_TOPIC = f"{BASE_TOPIC}/inverter/max_ac_charge_current_a/set"
+QUICK_GRID_CHARGING_CURRENT_TOPIC = f"{BASE_TOPIC}/inverter/quick_grid_charging_current_a/set"
 
 CAN_INTERFACE = "can0"
 CAN_BATTERY_STALE_SECONDS = 30

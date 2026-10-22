@@ -28,6 +28,7 @@ MEASUREMENT_SENSORS = [
     ("battery_charge_power", "Battery Charge 14.8kW", f"{settings.BASE_TOPIC}/derived/battery_charge_power_w", "W", "power"),
     ("battery_discharge_power", "Battery Discharge 14.8kW", f"{settings.BASE_TOPIC}/derived/battery_discharge_power_w", "W", "power"),
     ("battery_soc_estimated", "Battery SOC (Estimated)", f"{settings.BASE_TOPIC}/derived/battery_soc_estimated_pct", "%", "battery"),
+    ("program_11_actual", "Program 11 Actual", f"{settings.BASE_TOPIC}/inverter/program_11_actual_a", "A", "current"),
     ("pv2_power", "PV2 Power", f"{settings.BASE_TOPIC}/derived/pv2_power_w", "W", "power"),
     ("pv_total_power", "PV Total Power", f"{settings.BASE_TOPIC}/derived/pv_total_power_w", "W", "power"),
     ("bms_voltage", "BMS Voltage", f"{settings.BASE_TOPIC}/can_battery/bms_voltage_v", "V", "voltage"),
@@ -84,8 +85,11 @@ BINARY_SENSORS = [
 SELECTS = [
     ("npe_mode", "N-PE Bonding Mode", f"{settings.BASE_TOPIC}/npe_bonding/mode/state", settings.NPE_MODE_TOPIC, settings.NPE_MODES),
     ("battery_mode", "Battery Mode", f"{settings.BASE_TOPIC}/battery_mode/state", settings.BATTERY_MODE_TOPIC, BATTERY_MODES),
-    ("max_utility_charging_current", "Max Utility Charging Current A (prog 11)",
-     f"{settings.BASE_TOPIC}/inverter/max_utility_charging_current_a/state", settings.MAX_UTILITY_CHARGING_CURRENT_TOPIC,
+    ("normal_grid_charging_current", "Normal Grid Charging Current A (prog 11)",
+     f"{settings.BASE_TOPIC}/inverter/normal_grid_charging_current_a/state", settings.NORMAL_GRID_CHARGING_CURRENT_TOPIC,
+     [str(amps) for amps in settings.MAX_UTILITY_CHARGING_CURRENT_OPTIONS_A]),
+    ("quick_grid_charging_current", "Quick Grid Charging Current A (prog 11)",
+     f"{settings.BASE_TOPIC}/inverter/quick_grid_charging_current_a/state", settings.QUICK_GRID_CHARGING_CURRENT_TOPIC,
      [str(amps) for amps in settings.MAX_UTILITY_CHARGING_CURRENT_OPTIONS_A]),
 ]
 
@@ -119,6 +123,7 @@ class HomeAssistantDiscovery:
         ("binary_sensor", "grid_limiter_throttled"),
         ("number", "max_grid_current"),
         ("number", "max_ac_charge_current"),
+        ("select", "max_utility_charging_current"),
     ]
 
     def publish_all(self):

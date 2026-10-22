@@ -28,13 +28,13 @@ Battery mode (HA select) is the global trigger: each state sets program 01 (outp
 | Battery mode | State | When | 01 | 16 | 12 / 13 | 11 |
 |---|---|---|---|---|---|---|
 | normal | house on battery | default | SBU | CSO | HA values | 2A |
-| normal | house on grid, grid charging | SOC ≤ Low Battery Protection until Grid Stop Charging | SUB | CSO | 51 / 58V | HA value |
+| normal | house on grid, grid charging | SOC ≤ Low Battery Protection until Grid Stop Charging | SUB | CSO | 51 / 58V | Normal Grid Charging Current (50A ≈ 2.6kW) |
 | economy | house on battery | default, or PV above house load for ~1 min | SBU | OSO | HA values | 2A |
 | economy | house on grid, battery resting | SOC ≤ Low Battery Protection and PV below house load | SUB | OSO | 51 / 58V | 2A |
-| quick_grid | house on grid, grid charging | SOC below Grid Quick Charge (after reaching it: 5% below) | SUB | CSO | 51 / 58V | HA value |
+| quick_grid | house on grid, grid charging | SOC below Grid Quick Charge (after reaching it: 5% below) | SUB | CSO | 51 / 58V | Quick Grid Charging Current (90A ≈ 4.7kW) |
 | quick_grid | house on battery | SOC at Grid Quick Charge | SBU | OSO | HA values | 2A |
 | any | no battery | BMS cut off for 60s | SUB | OSO | 51 / 58V | 2A |
-| normal, quick_grid | BMS offline fallback | no BMS + no solar 3h | SUB | CSO | 51 / 58V | HA value |
+| normal, quick_grid | BMS offline fallback | no BMS + no solar 3h | SUB | CSO | 51 / 58V | Normal Grid Charging Current |
 
 Why SUB: under SBU the inverter leaves the battery only below program 12 (51V maximum), where this LiFePO4 still rests
 at ~10%, and in battery mode it never grid-charges. Why CSO: on this inverter only charger source CSO (PCP01)
@@ -68,8 +68,9 @@ MCB rating (A) is an HA number, persisted in `soc_settings.json`.
 ## Program 11 (max utility charging current)
 
 HA select with the values the inverter accepts (manual: 2, 10-140A, 150/160A on the 10.2kW model), in battery side DC amps.
-The picked value is the grid charging current: the battery mode applies it only in grid-charging states and runs 2A
-otherwise, sending MUCHGC when the wanted value changes. It is re-read every 10 min.
+Two HA selects, Normal and Quick Grid Charging Current: the battery mode applies normal's in normal grid charging,
+quick's in quick_grid, and 2A in every other state, sending MUCHGC when the wanted value changes. The sensor
+"Program 11 Actual" shows what the inverter runs (re-read every 10 min).
 It is independent of the MCB rating: 30A DC is about 1.6kW, roughly 7A on the grid side.
 Observed: with the BMS connected (LIb), the inverter charged at ~93A while program 11 was 30A, so the MCB lockout, not program 11,
 is what protects the breaker.

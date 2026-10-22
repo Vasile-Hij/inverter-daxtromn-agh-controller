@@ -49,7 +49,7 @@ def notify_systemd(message):
 SOC_SETTING_KEYS = ("low_battery_protection_soc_pct", "grid_stop_charging_soc_pct", "grid_quick_charge_soc_pct")
 VOLTAGE_SETTING_KEYS = ("back_to_grid_v", "back_to_battery_v")
 LIMITER_SETTING_KEYS = ("mcb_rating_a",)
-CHARGING_CURRENT_SETTING_KEYS = ("grid_charging_current_a",)
+CHARGING_CURRENT_SETTING_KEYS = ("normal_grid_charging_current_a", "quick_grid_charging_current_a")
 
 
 class SolarMonitor:
@@ -76,7 +76,8 @@ class SolarMonitor:
             settings.GRID_QUICK_CHARGE_SOC_PCT,
         )
         self.voltage_thresholds = BatteryVoltageThresholds(settings.BACK_TO_GRID_V, settings.BACK_TO_BATTERY_V)
-        self.grid_charging_current_a = settings.GRID_CHARGING_CURRENT_A
+        self.normal_grid_charging_current_a = settings.NORMAL_GRID_CHARGING_CURRENT_A
+        self.quick_grid_charging_current_a = settings.QUICK_GRID_CHARGING_CURRENT_A
         self._load_soc_settings()
         self.undervoltage_alarm = Alarm("pi-undervoltage", settings.ALARM_REPEAT_SECONDS)
 
@@ -118,7 +119,8 @@ class SolarMonitor:
             settings.BACK_TO_GRID_V_TOPIC: self._handle_back_to_grid_v,
             settings.BACK_TO_BATTERY_V_TOPIC: self._handle_back_to_battery_v,
             settings.MCB_RATING_TOPIC: self._handle_mcb_rating,
-            settings.MAX_UTILITY_CHARGING_CURRENT_TOPIC: self._handle_max_utility_charging_current,
+            settings.NORMAL_GRID_CHARGING_CURRENT_TOPIC: self._handle_normal_grid_charging_current,
+            settings.QUICK_GRID_CHARGING_CURRENT_TOPIC: self._handle_quick_grid_charging_current,
         }
         self._source_mtimes = self._snapshot_source_mtimes()
 
@@ -307,22 +309,39 @@ class SolarMonitor:
             print(f"MCB rating set to {value}A", flush=True)
             self._save_soc_settings()
 
-    def _handle_max_utility_charging_current(self, payload):
+    @staticmethod
+    def _parse_charging_current(payload):
         if not is_number(payload):
-            return
+            return None
         value = int(float(payload))
         if value not in settings.MAX_UTILITY_CHARGING_CURRENT_OPTIONS_A:
-            print(f"rejected max utility charging current {value}A: not a program 11 option", flush=True)
+            print(f"rejected grid charging current {value}A: not a program 11 option", flush=True)
+            return None
+        return value
+
+    def _handle_normal_grid_charging_current(self, payload):
+        value = self._parse_charging_current(payload)
+        if value is None:
             return
-        # the battery mode decides when it applies: only grid-charging states run it, the rest run the minimum
-        self.grid_charging_current_a = value
-        print(f"grid charging current set to {value}A", flush=True)
+        self.normal_grid_charging_current_a = value
+        print(f"normal grid charging current set to {value}A", flush=True)
+        self._save_soc_settings()
+
+    def _handle_quick_grid_charging_current(self, payload):
+        value = self._parse_charging_current(payload)
+        if value is None:
+            return
+        self.quick_grid_charging_current_a = value
+        print(f"quick grid charging current set to {value}A", flush=True)
         self._save_soc_settings()
 
     def _desired_utility_charging_current_a(self):
-        if self.battery_mode.is_grid_charging_wanted:
-            return self.grid_charging_current_a
-        return settings.MAX_UTILITY_CHARGING_CURRENT_OPTIONS_A[0]
+        # the battery mode decides when program 11 grid-charges and at which mode's current; otherwise the minimum
+        if not self.battery_mode.is_grid_charging_wanted:
+            return settings.MAX_UTILITY_CHARGING_CURRENT_OPTIONS_A[0]
+        if self.battery_mode.selected_mode == "quick_grid":
+            return self.quick_grid_charging_current_a
+        return self.normal_grid_charging_current_a
 
     def _desired_voltage_thresholds(self):
         return self.voltage_thresholds.desired(self.battery_mode.holds_load_on_grid)
@@ -731,9 +750,13 @@ class SolarMonitor:
                             "ON" if self.grid_limiter.is_over_rating else "OFF")
         self.client.publish(f"{settings.BASE_TOPIC}/grid_limiter/mcb_rating_a/state",
                             self.grid_limiter.mcb_rating_a)
-        # battery mode drives program 11, so HA shows the value the mode wants, like programs 12/13
-        self.client.publish(f"{settings.BASE_TOPIC}/inverter/max_utility_charging_current_a/state",
-                            self._desired_utility_charging_current_a())
+        self.client.publish(f"{settings.BASE_TOPIC}/inverter/normal_grid_charging_current_a/state",
+                            self.normal_grid_charging_current_a)
+        self.client.publish(f"{settings.BASE_TOPIC}/inverter/quick_grid_charging_current_a/state",
+                            self.quick_grid_charging_current_a)
+        if self.actual_utility_charging_current_a is not None:
+            self.client.publish(f"{settings.BASE_TOPIC}/inverter/program_11_actual_a",
+                                self.actual_utility_charging_current_a)
 
         self.client.publish(f"{settings.BASE_TOPIC}/battery/discharge_stop_soc/state",
                             self.battery_mode.low_battery_protection_soc_pct)
