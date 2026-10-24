@@ -4,7 +4,8 @@ output priority, charger source, the program 12/13 hold and whether program 11 g
 - normal: house on battery (SBU); at Low Battery Protection SOC the house moves to grid (SUB) and
   grid-charges up to Grid Stop Charging SOC, then back to battery
 - economy: never grid-charges; at Low Battery Protection SOC the house moves to grid and the battery
-  rests until PV covers the house consumption, then back to battery
+  takes solar only, until PV covers the house consumption plus the inverter's own draw, then back to
+  battery (SBU, solar only)
 - quick_grid: house on grid, grid-charging whenever SOC is below Grid Quick Charge SOC; at the target
   the house runs on battery with solar only, and grid charging resumes QUICK_GRID_RESUME_MARGIN_PCT below
 
@@ -40,6 +41,8 @@ INVERTER_CAPACITY_STOP_MARGIN_PCT = 10
 NO_BATTERY_CONFIRM_CYCLES = 12
 # PV must cover (or stop covering) the house this many cycles (about a minute) before economy moves the house
 PV_SURPLUS_CONFIRM_CYCLES = 12
+# the inverter draws this itself on top of the AC output it reports, so PV must cover both
+INVERTER_SELF_CONSUMPTION_W = 160
 QUICK_GRID_RESUME_MARGIN_PCT = 5
 
 
@@ -154,7 +157,7 @@ class BatteryMode:
         return estimated_soc_pct <= self.grid_quick_charge_soc_pct - QUICK_GRID_RESUME_MARGIN_PCT
 
     def _update_pv_surplus(self, pv_power_w, load_power_w):
-        surplus_now = pv_power_w > load_power_w
+        surplus_now = pv_power_w > load_power_w + INVERTER_SELF_CONSUMPTION_W
         if surplus_now == self._pv_surplus:
             self._pv_surplus_change_cycles = 0
             return
