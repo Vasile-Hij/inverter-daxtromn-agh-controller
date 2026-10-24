@@ -1,6 +1,6 @@
 from inverter.battery_mode import (
-    BatteryMode, BATTERY_MODES, BATTERY_MODE_DEFAULT, NO_BATTERY_CONFIRM_CYCLES, PV_SURPLUS_CONFIRM_CYCLES,
-    QUICK_GRID_RESUME_MARGIN_PCT, STATE_SETTINGS,
+    BatteryMode, BATTERY_MODES, BATTERY_MODE_DEFAULT, INVERTER_SELF_CONSUMPTION_W, NO_BATTERY_CONFIRM_CYCLES,
+    PV_SURPLUS_CONFIRM_CYCLES, QUICK_GRID_RESUME_MARGIN_PCT, STATE_SETTINGS,
 )
 
 
@@ -109,6 +109,21 @@ class TestEconomyMode:
         for _ in range(PV_SURPLUS_CONFIRM_CYCLES * 2):
             update(mode, 10, pv_power_w=400, load_power_w=500)
         assert mode.state == "economy_grid"
+
+    def test_stays_on_grid_while_pv_covers_house_but_not_inverter_draw(self):
+        mode = create_battery_mode("economy")
+        update(mode, 10)
+        for _ in range(PV_SURPLUS_CONFIRM_CYCLES * 2):
+            update(mode, 10, pv_power_w=500 + INVERTER_SELF_CONSUMPTION_W, load_power_w=500)
+        assert mode.state == "economy_grid"
+
+    def test_pv_covering_house_and_inverter_draw_returns_house_to_battery(self):
+        mode = create_battery_mode("economy")
+        update(mode, 10)
+        for _ in range(PV_SURPLUS_CONFIRM_CYCLES):
+            update(mode, 10, pv_power_w=501 + INVERTER_SELF_CONSUMPTION_W, load_power_w=500)
+        assert mode.state == "economy_battery"
+        assert_on_battery(mode, "no_grid_charging")
 
     def test_pv_surplus_returns_house_to_battery(self):
         mode = create_battery_mode("economy")
