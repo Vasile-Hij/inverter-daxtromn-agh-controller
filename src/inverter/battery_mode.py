@@ -42,7 +42,7 @@ NO_BATTERY_CONFIRM_CYCLES = 12
 # PV must cover (or stop covering) the house this many cycles (about a minute) before economy moves the house
 PV_SURPLUS_CONFIRM_CYCLES = 12
 # the inverter draws this itself on top of the AC output it reports, so PV must cover both
-INVERTER_SELF_CONSUMPTION_W = 160
+INVERTER_SELF_CONSUMPTION_W = 80
 QUICK_GRID_RESUME_MARGIN_PCT = 5
 
 
