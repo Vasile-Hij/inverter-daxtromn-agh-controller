@@ -173,7 +173,7 @@ class DaxtromnConfigurator(PI30Connection):
             (args.float_voltage, "PBFT{:04.1f}", "float voltage"),
             (args.cutoff_voltage, "PSDV{:04.1f}", "low DC cut-off"),
             (args.utility_charge_current, "MUCHGC{:03d}", "max utility charge current"),
-            (args.total_charge_current, "MCHGC{:03d}", "max total charge current"),
+            (args.total_charge_current, "MNCHGC0{:03d}", "max total charge current"),
             (args.charger_source, "PCP{:02d}", "charger source priority"),
         ]
         requested_changes = []
