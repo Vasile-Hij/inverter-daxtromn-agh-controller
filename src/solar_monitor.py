@@ -399,6 +399,15 @@ class SolarMonitor:
 
         self.actual_utility_charging_current_a = self.inverter.query_max_ac_charge_current()
         print(f"initial program 11 max utility charging current: {self.actual_utility_charging_current_a}A", flush=True)
+        self._apply_max_total_charging_current()
+
+    def _apply_max_total_charging_current(self):
+        actual_amps = self.inverter.query_max_total_charge_current()
+        print(f"initial program 02 max total charging current: {actual_amps}A", flush=True)
+        if actual_amps is None or actual_amps == settings.MAX_TOTAL_CHARGING_CURRENT_A:
+            return
+        if self.inverter.set_max_total_charge_current(settings.MAX_TOTAL_CHARGING_CURRENT_A):
+            print(f"program 02: max total charging current {settings.MAX_TOTAL_CHARGING_CURRENT_A}A", flush=True)
 
     def run(self):
         self._connect_mqtt()

@@ -22,6 +22,7 @@ class DaxtromnInverter(PI30Connection):
     """
 
     QPIRI_MAX_AC_CHARGE_CURRENT_INDEX = 13
+    QPIRI_MAX_TOTAL_CHARGE_CURRENT_INDEX = 14
     QPIRI_OUTPUT_SOURCE_INDEX = 16
     QPIRI_CHARGER_SOURCE_INDEX = 17
     QPIRI_BACK_TO_GRID_V_INDEX = 8
@@ -181,31 +182,43 @@ class DaxtromnInverter(PI30Connection):
                 time.sleep(COMMAND_RETRY_DELAY_SECONDS)
         return False
 
-    def query_max_ac_charge_current(self):
+    def _query_qpiri_integer(self, field_index):
         raw_response = self.send_command("QPIRI")
         payload = self.extract_payload(raw_response)
         if payload is None:
             return None
         fields = payload.split()
-        if len(fields) <= self.QPIRI_MAX_AC_CHARGE_CURRENT_INDEX:
+        if len(fields) <= field_index:
             return None
-        raw_value = fields[self.QPIRI_MAX_AC_CHARGE_CURRENT_INDEX]
+        raw_value = fields[field_index]
         if not is_number(raw_value):
             return None
         return int(float(raw_value))
 
-    def set_max_ac_charge_current(self, amps):
-        command_text = f"MUCHGC{amps:03d}"
+    def _set_charge_current(self, command_text, field_index, amps):
         failure_reason = self._command_failure_reason(command_text)
         if failure_reason is not None:
-            print(f"set_max_ac_charge_current failed: {failure_reason}", flush=True)
+            print(f"charge current command failed: {failure_reason}", flush=True)
             return False
         time.sleep(1)
-        actual_amps = self.query_max_ac_charge_current()
+        actual_amps = self._query_qpiri_integer(field_index)
         if actual_amps != amps:
-            print(f"set_max_ac_charge_current: {command_text} ACKed but inverter reports {actual_amps}A", flush=True)
+            print(f"{command_text} ACKed but inverter reports {actual_amps}A", flush=True)
             return False
         return True
+
+    def query_max_ac_charge_current(self):
+        return self._query_qpiri_integer(self.QPIRI_MAX_AC_CHARGE_CURRENT_INDEX)
+
+    def set_max_ac_charge_current(self, amps):
+        return self._set_charge_current(f"MUCHGC{amps:03d}", self.QPIRI_MAX_AC_CHARGE_CURRENT_INDEX, amps)
+
+    def query_max_total_charge_current(self):
+        return self._query_qpiri_integer(self.QPIRI_MAX_TOTAL_CHARGE_CURRENT_INDEX)
+
+    def set_max_total_charge_current(self, amps):
+        """Program 02: solar plus grid charging current, battery side DC amps."""
+        return self._set_charge_current(f"MNCHGC0{amps:03d}", self.QPIRI_MAX_TOTAL_CHARGE_CURRENT_INDEX, amps)
 
     def set_charger_source(self, pcp_command):
         failure_reason = self._command_failure_reason(pcp_command)
